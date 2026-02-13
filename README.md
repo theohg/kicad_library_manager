@@ -1,6 +1,6 @@
 ### KiCad Library Manager
 
-The plugin is a plugin for managing a KiCad parts library repository
+An IPC plugin for KiCad for managing local database (sqlite libraries) across many users with a nice UI.
 
 - submit part/category requests via GitHub (`Requests/*.json`)
 - fetch/sync a local clone/submodule
