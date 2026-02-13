@@ -1,0 +1,62 @@
+name: Assign IPNs (PR)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+
+jobs:
+  assign:
+    # Only run when the PR is from the same repo (not a fork), otherwise we cannot push safely.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    concurrency:
+      # Avoid multiple runs pushing to the same PR branch.
+      group: kicad-library-ipn-${{ github.head_ref }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Assign IPNs for TMP placeholders
+        run: |
+          python3 tools/assign_ipn.py --repo .
+
+      - name: Commit back to PR branch (if changed)
+        run: |
+          if git diff --quiet; then
+            echo "No IPN changes to commit."
+            exit 0
+          fi
+          git config user.name "kicad-library-bot"
+          git config user.email "kicad-library-bot@users.noreply.github.com"
+          git add Database/db-*.csv
+          # Keep commit subject informative but short (shown in history views).
+          git commit -m "ci: assign IPNs (PR) [skip ci]"
+          # Push with retry to handle occasional non-fast-forward races.
+          for i in 1 2 3; do
+            git fetch origin "${GITHUB_HEAD_REF}" --quiet || true
+            if ! git rebase "origin/${GITHUB_HEAD_REF}"; then
+              echo "Rebase failed; aborting."
+              git rebase --abort || true
+              exit 1
+            fi
+            if git push; then
+              exit 0
+            fi
+            echo "Push failed (attempt $i). Retrying..."
+            sleep $((i * 2))
+          done
+          echo "Push failed after retries."
+          exit 1
+

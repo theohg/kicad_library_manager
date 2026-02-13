@@ -1,0 +1,4 @@
+kicad-python
+rapidfuzz
+wxPython
+

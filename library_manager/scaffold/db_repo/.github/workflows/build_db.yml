@@ -1,0 +1,124 @@
+name: Build SQLite DB (__BASE_BRANCH__)
+
+on:
+  push:
+    branches: [__BASE_BRANCH__]
+    paths:
+      - "Database/**"
+      - "Requests/**"
+      - "tools/**"
+      - ".github/workflows/build_db.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
+    runs-on: ubuntu-latest
+    concurrency:
+      # Serialize ALL workflows that push to the base branch.
+      group: kicad-library-main-writer
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Process requests + rebuild DB + push
+        run: |
+          git config user.name "kicad-library-bot"
+          git config user.email "kicad-library-bot@users.noreply.github.com"
+
+          request_summary() {
+            # Capture a concise summary of Requests/*.json *before* they are processed/deleted.
+            # This becomes the commit subject/body so history views are informative.
+            rm -f /tmp/request_summary.txt /tmp/request_count.txt || true
+            python3 - <<'PY'
+          import glob, json, os
+          reqs = []
+          for p in sorted(glob.glob("Requests/*.json")):
+            fn = os.path.basename(p)
+            try:
+              with open(p, "r", encoding="utf-8") as f:
+                d = json.load(f) or {}
+            except Exception:
+              d = {}
+            action = str(d.get("action") or "").strip()
+            category = str(d.get("category") or d.get("category_name") or d.get("cat") or "").strip()
+            ipn = str(d.get("ipn") or d.get("resolved_ipn") or "").strip()
+            path = str(d.get("path") or "").strip()
+            parts = [fn]
+            if action: parts.append(action)
+            if category: parts.append(category)
+            if ipn: parts.append(ipn)
+            if (not ipn) and path:
+              parts.append(path)
+            reqs.append(" - " + " | ".join(parts))
+          with open("/tmp/request_summary.txt", "w", encoding="utf-8") as f:
+            if reqs:
+              f.write("Requests processed:\n")
+              f.write("\n".join(reqs) + "\n")
+          with open("/tmp/request_count.txt", "w", encoding="utf-8") as f:
+            f.write(str(len(reqs)))
+          PY
+          }
+
+          # IMPORTANT:
+          # We generate binary outputs (parts.sqlite) and often touch the same CSVs.
+          # Rebasing these commits can create conflicts. Instead:
+          # - always reset to the latest origin/<base>
+          # - rebuild from scratch
+          # - commit and push (fast-forward)
+          # - if push is rejected, retry by resetting + rebuilding again
+          for i in 1 2 3; do
+            echo "=== Attempt $i ==="
+            git fetch origin __BASE_BRANCH__ --quiet
+            git checkout -B __BASE_BRANCH__ origin/__BASE_BRANCH__
+            git reset --hard origin/__BASE_BRANCH__
+            git clean -fd
+
+            request_summary
+
+            python3 tools/process_requests.py --repo .
+            python3 tools/assign_ipn.py --repo .
+            python3 tools/update_dbl.py --repo .
+            python3 tools/build_sqlite.py --repo .
+
+            if git diff --quiet; then
+              echo "No DB changes to commit."
+              exit 0
+            fi
+
+            # Stage whole directories so deletions are captured (deleted Requests/*.json, etc).
+            git add -A Requests Database tools
+            REQ_COUNT="$(cat /tmp/request_count.txt 2>/dev/null || echo 0)"
+            if [ "${REQ_COUNT}" -gt 0 ]; then
+              SUBJECT="ci: rebuild database (${REQ_COUNT} request(s)) [skip ci]"
+            else
+              SUBJECT="ci: rebuild database [skip ci]"
+            fi
+            if [ -s /tmp/request_summary.txt ]; then
+              git commit -m "${SUBJECT}" -m "$(cat /tmp/request_summary.txt)"
+            else
+              git commit -m "${SUBJECT}"
+            fi
+
+            if git push; then
+              exit 0
+            fi
+
+            echo "Push rejected (attempt $i). Retrying..."
+            sleep $((i * 2))
+          done
+
+          echo "Push failed after retries."
+          exit 1
+

@@ -1,0 +1,10 @@
+# Used by CI when a brand-new category has no existing IPNs yet.
+#
+# Format:
+# CategoryName:
+#   prefix: "ABC-"
+#   width: 7
+#
+# Most existing categories infer their prefix automatically from existing rows.
+#
+
