@@ -1406,7 +1406,7 @@ class MainDialog(wx.Frame):
                     "This UI is configured to use only the bundled generator shipped with the IPC plugin bundle.\n\n"
                     "Fix:\n"
                     "- Install/symlink the plugin bundle folder `kicad_plugin/` into KiCad's IPC plugins directory\n"
-                    "  (see INSTALL_IPC.md)\n"
+                    "  (see README.md)\n"
                     "- Restart pcbnew\n\n"
                     f"Import error:\n{exc}",
                     "Create footprint",
