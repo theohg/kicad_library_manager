@@ -1122,11 +1122,46 @@ class MainDialog(wx.Frame):
         self._tasks.run(work, done)
 
     def _on_settings(self, _evt: wx.CommandEvent) -> None:
-        dlg = RepoSettingsDialog(self, self._cfg, repo_path=self._repo_path)
+        try:
+            dlg = RepoSettingsDialog(self, self._cfg, repo_path=self._repo_path)
+        except Exception as exc:  # noqa: BLE001
+            tb = traceback.format_exc()
+            try:
+                self._append_log("Settings dialog crashed while opening:\n" + tb)
+            except Exception:
+                pass
+            try:
+                wx.MessageBox(
+                    "Settings crashed while opening:\n\n" + str(exc) + "\n\n" + tb,
+                    "KiCad Library Manager",
+                    wx.OK | wx.ICON_ERROR,
+                )
+            except Exception:
+                pass
+            return
+
         try:
             res = dlg.ShowModal()
+        except Exception as exc:  # noqa: BLE001
+            tb = traceback.format_exc()
+            try:
+                self._append_log("Settings dialog crashed:\n" + tb)
+            except Exception:
+                pass
+            try:
+                wx.MessageBox(
+                    "Settings crashed:\n\n" + str(exc) + "\n\n" + tb,
+                    "KiCad Library Manager",
+                    wx.OK | wx.ICON_ERROR,
+                )
+            except Exception:
+                pass
+            return
         finally:
-            dlg.Destroy()
+            try:
+                dlg.Destroy()
+            except Exception:
+                pass
         if res == wx.ID_OK:
             # Settings may affect origin URL/branch; refresh UI immediately.
             try:

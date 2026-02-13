@@ -32,8 +32,10 @@ class RepoSettingsDialog(wx.Dialog):
         grid.Add(wx.StaticText(self, label="Remote database URL"), 0, wx.ALIGN_CENTER_VERTICAL)
         # Prefer the single-field URL; fall back to reconstructing from legacy fields.
         guess = (cfg.remote_db_url or "").strip()
-        if not guess and (cfg.github_owner.strip() and cfg.github_repo.strip()):
-            guess = f"https://github.com/{cfg.github_owner.strip()}/{cfg.github_repo.strip()}.git"
+        owner_guess = (getattr(cfg, "github_owner", "") or "").strip()
+        repo_guess = (getattr(cfg, "github_repo", "") or "").strip()
+        if not guess and (owner_guess and repo_guess):
+            guess = f"https://github.com/{owner_guess}/{repo_guess}.git"
         self.remote_url = wx.TextCtrl(self, value=str(guess or ""))
         try:
             self.remote_url.SetHint("e.g. git@github.com:OWNER/REPO.git or https://github.com/OWNER/REPO.git or OWNER/REPO")
@@ -75,7 +77,9 @@ class RepoSettingsDialog(wx.Dialog):
         self.init_btn.Bind(wx.EVT_BUTTON, self._on_init_repo)
         btns.Add(self.init_btn, 0, wx.ALL, 10)
         btns.AddStretchSpacer(1)
-        btns.Add(self.CreateButtonSizer(wx.OK | wx.CANCEL), 0, wx.ALL | wx.ALIGN_RIGHT, 10)
+        # NOTE: wx.ALIGN_RIGHT is invalid inside a horizontal sizer on some wx builds
+        # (asserts). The stretch spacer already pushes this to the right.
+        btns.Add(self.CreateButtonSizer(wx.OK | wx.CANCEL), 0, wx.ALL, 10)
         root.Add(btns, 0, wx.EXPAND)
         self.SetSizer(root)
         self.SetMinSize((720, 260))
