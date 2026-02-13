@@ -1,0 +1,16 @@
+{
+  "$schema": "https://gitlab.com/kicad/code/kicad/-/raw/master/kicad/pcm/schemas/pcm.v1.schema.json#/definitions/Repository",
+  "name": "nguyen-v's KiCad PCM repository",
+  "maintainer": {
+    "name": "Vincent Nguyen",
+    "contact": {
+      "web": "https://github.com/nguyen-v/kicad_library_manager"
+    }
+  },
+  "packages": {
+    "url": "https://nguyen-v.github.io/kicad_library_manager/packages.json",
+    "sha256": "fbf680b0a9864f84b39536055e6fbac158a5d3eb842c3ff3ff783f1eb9a5047f",
+    "update_timestamp": 1771023891,
+    "update_time_utc": "2026-02-13 23:04:51"
+  }
+}

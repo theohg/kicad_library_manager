@@ -1,0 +1,41 @@
+{
+  "packages": [
+    {
+      "$schema": "https://go.kicad.org/pcm/schemas/v1",
+      "name": "KiCad Library Manager",
+      "description": "Manage a shared KiCad DBL parts library with requests/sync and previews.",
+      "description_full": "An IPC plugin for KiCad that manages a shared database-backed library repo (sqlite/DBL) across multiple users. Includes request submission via GitHub, repo sync helpers, browsing/editing parts, and bootstrap tools for a new DB repo.",
+      "identifier": "com.github.nguyen-v.kicad-library-manager",
+      "type": "plugin",
+      "author": {
+        "name": "Vincent Nguyen",
+        "contact": {
+          "web": "https://github.com/nguyen-v/kicad_library_manager"
+        }
+      },
+      "license": "GPL-3.0",
+      "resources": {
+        "homepage": "https://github.com/nguyen-v/kicad_library_manager",
+        "repository": "https://github.com/nguyen-v/kicad_library_manager",
+        "icon": "https://nguyen-v.github.io/kicad_library_manager/icon.png"
+      },
+      "versions": [
+        {
+          "version": "1.0.0",
+          "status": "stable",
+          "kicad_version": "9.0",
+          "runtime": "ipc",
+          "platforms": [
+            "windows",
+            "macos",
+            "linux"
+          ],
+          "download_url": "https://github.com/nguyen-v/kicad_library_manager/releases/download/v1.0.0/kicad-library-manager-1.0.0.zip",
+          "download_sha256": "b5ccdb0a47891077957703af6551544cef5b61ee5c4c01bf54b406067af974bd",
+          "download_size": 286504,
+          "install_size": 1040826
+        }
+      ]
+    }
+  ]
+}
