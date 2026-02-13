@@ -145,6 +145,18 @@ class RepoSettingsDialog(wx.Dialog):
         except Exception:
             pass
 
+        # Load repo-local settings (portable) to avoid cross-project leakage.
+        try:
+            eff = Config.load_effective(picked)
+            if (eff.remote_db_url or "").strip():
+                self.remote_url.SetValue(str(eff.remote_db_url or ""))
+            if (eff.github_base_branch or "").strip():
+                self.base.SetValue(str(eff.github_base_branch or "main"))
+            if (eff.dbl_filename or "").strip():
+                self.dbl.SetValue(str(eff.dbl_filename or ""))
+        except Exception:
+            pass
+
         # Best-effort: if this looks like a database repo, auto-guess DBL filename.
         try:
             cands = sorted(glob.glob(os.path.join(picked, "Database", "*.kicad_dbl")))
@@ -207,6 +219,17 @@ class RepoSettingsDialog(wx.Dialog):
         if not dbl.endswith(".kicad_dbl"):
             dbl = dbl + ".kicad_dbl"
         self._cfg.dbl_filename = dbl
+        # Save repo-local settings into the database repo (portable across computers).
+        try:
+            if rp:
+                Config.save_repo_settings(
+                    rp,
+                    remote_db_url=url,
+                    github_base_branch=branch,
+                    dbl_filename=dbl,
+                )
+        except Exception as exc:  # noqa: BLE001
+            wx.MessageBox(f"Could not save per-library settings into this repo:\n\n{exc}", "Repository settings", wx.OK | wx.ICON_WARNING, parent=self)
         try:
             self._cfg.save()
         except Exception as exc:  # noqa: BLE001

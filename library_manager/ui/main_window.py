@@ -58,7 +58,7 @@ class MainDialog(wx.Frame):
         )
         self._repo_path = repo_path
         self._project_path = str(project_path or "")
-        self._cfg = Config.load()
+        self._cfg = Config.load_effective(repo_path)
         self._categories: list[Category] = []
         self._tasks = WindowTaskRunner(self)
         self._did_autosize_cat_cols = False
@@ -1352,22 +1352,23 @@ class MainDialog(wx.Frame):
                 pass
         if res == wx.ID_OK:
             # Settings may affect origin URL/branch; refresh UI immediately.
+            # First, reload global config to capture the latest local repo path choice.
             try:
-                self._cfg = Config.load()
-            except Exception:
-                pass
-            # If user changed local database path, switch this window to it immediately.
-            try:
-                new_rp = str(getattr(self._cfg, "repo_path", "") or "").strip()
+                cfg_global = Config.load()
+                new_rp = str(getattr(cfg_global, "repo_path", "") or "").strip()
             except Exception:
                 new_rp = ""
             if new_rp and new_rp != str(getattr(self, "_repo_path", "") or "").strip():
                 self._repo_path = new_rp
-                # Reset remote SHA so polling will re-check against the new repo.
                 try:
                     self._last_remote_sha = None
                 except Exception:
                     pass
+            # Then load effective config for the selected repo (applies per-library settings).
+            try:
+                self._cfg = Config.load_effective(self._repo_path)
+            except Exception:
+                pass
             # Re-evaluate whether repo is initialized; avoid crashes/freezes while setting up.
             try:
                 self._apply_repo_state()

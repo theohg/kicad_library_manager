@@ -417,7 +417,7 @@ class ManageCategoriesDialog(wx.Dialog):
     def __init__(self, parent: wx.Window, repo_path: str):
         super().__init__(parent, title="Manage categories", style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER | wx.MAXIMIZE_BOX)
         self._repo_path = repo_path
-        self._cfg = Config.load()
+        self._cfg = Config.load_effective(self._repo_path)
         self._categories: list[Category] = []
         self._closing = False
         self._last_fetch_mtime = float(git_fetch_head_mtime(self._repo_path) or 0.0)
@@ -940,7 +940,7 @@ class ManageCategoriesDialog(wx.Dialog):
 
         threading.Thread(target=worker, daemon=True).start()
     def _on_add(self, _evt: wx.CommandEvent) -> None:
-        cfg = Config.load()
+        cfg = Config.load_effective(self._repo_path)
         if not (cfg.github_owner.strip() and cfg.github_repo.strip()):
             wx.MessageBox("GitHub is not configured. Click Settings… first.", "KiCad Library Manager", wx.OK | wx.ICON_WARNING)
             return
@@ -989,7 +989,7 @@ class ManageCategoriesDialog(wx.Dialog):
         ) != wx.YES:
             return
 
-        cfg = Config.load()
+        cfg = Config.load_effective(self._repo_path)
         if not (cfg.github_owner.strip() and cfg.github_repo.strip()):
             wx.MessageBox("GitHub is not configured. Click Settings… first.", "Edit category", wx.OK | wx.ICON_WARNING)
             return
@@ -1107,7 +1107,7 @@ class ManageCategoriesDialog(wx.Dialog):
         ) != wx.YES:
             return
 
-        cfg = Config.load()
+        cfg = Config.load_effective(self._repo_path)
         if not (cfg.github_owner.strip() and cfg.github_repo.strip()):
             wx.MessageBox("GitHub is not configured. Click Settings… first.", "Delete category", wx.OK | wx.ICON_WARNING)
             return

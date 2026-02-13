@@ -86,7 +86,7 @@ def asset_change_sets(repo_path: str) -> tuple[set[str], set[str], bool]:
     try:
         from ..config import Config
 
-        br = (Config.load().github_base_branch or "main").strip() or "main"
+        br = (Config.load_effective(repo_path).github_base_branch or "main").strip() or "main"
         remote = git_diff_name_status(repo_path, "HEAD", f"origin/{br}", ["Symbols", "Footprints"])
         remote_paths = {p for _st, p in remote if p}
     except Exception:
@@ -148,7 +148,7 @@ def remote_summary_scoped(repo_path: str, prefixes: list[str], label: str) -> Re
     try:
         from ..config import Config
 
-        br = (Config.load().github_base_branch or "main").strip() or "main"
+        br = (Config.load_effective(repo_path).github_base_branch or "main").strip() or "main"
         ref = f"origin/{br}"
     except Exception:
         br = "main"

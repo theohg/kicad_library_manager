@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json as _json
 import glob
 import os
 from dataclasses import dataclass
@@ -87,6 +88,23 @@ def compute_init_actions(*, repo_path: str, base_branch: str, dbl_filename: str)
     # Database seed
     out.append((os.path.join("Database", dbl).replace("\\", "/"), _read_text(os.path.join(root, "Database", "template.kicad_dbl"))))
     add_from_template("Database/categories.yml", replace_branch=False)
+    # Repo-local settings (portable across machines). Remote URL is user-specific, so leave empty.
+    try:
+        settings_txt = _json.dumps(
+            {
+                "version": 1,
+                "remote_db_url": "",
+                "github_base_branch": br,
+                "dbl_filename": dbl,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    except Exception:
+        settings_txt = ""
+    if settings_txt:
+        settings_txt = settings_txt + "\n"
+    out.append((os.path.join("Database", "kicad_library_manager.json").replace("\\", "/"), settings_txt))
 
     # Gitkeep markers to keep empty dirs present in the repo
     out.append(("Requests/.gitkeep", ""))

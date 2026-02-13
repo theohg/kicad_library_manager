@@ -335,7 +335,7 @@ class BrowseDialog(wx.Frame):
             self._last_fetch_mtime = fetch_m
             # Update pending states for this category based on request file presence on origin/<branch>.
             try:
-                br = (Config.load().github_base_branch.strip() or "main")
+                br = (Config.load_effective(self._repo_path).github_base_branch.strip() or "main")
             except Exception:
                 br = "main"
             try:
@@ -370,7 +370,7 @@ class BrowseDialog(wx.Frame):
                 self.status_icon.SetBitmap(self._bmp_green)
                 from ..config import Config
 
-                br = (Config.load().github_base_branch.strip() or "main")
+                br = (Config.load_effective(self._repo_path).github_base_branch.strip() or "main")
                 self.status_lbl.SetLabel(f"Library status: synchronized with origin/{br}")
             elif dirty:
                 self.status_icon.SetBitmap(self._bmp_yellow)
@@ -426,7 +426,7 @@ class BrowseDialog(wx.Frame):
         # Best-effort fallback: do a plain fetch.
         from ..config import Config
 
-        cfg = Config.load()
+        cfg = Config.load_effective(self._repo_path)
         branch = (cfg.github_base_branch.strip() or "main")
 
         try:
@@ -510,7 +510,7 @@ class BrowseDialog(wx.Frame):
             err: Exception | None = None
             out: str = ""
             try:
-                br = (Config.load().github_base_branch or "main").strip() or "main"
+                br = (Config.load_effective(self._repo_path).github_base_branch or "main").strip() or "main"
             except Exception:
                 br = "main"
             try:
@@ -807,7 +807,7 @@ class BrowseDialog(wx.Frame):
                 # Read the remote CSV content without network (uses FETCH_HEAD refs).
                 from ..config import Config
 
-                br = (Config.load().github_base_branch.strip() or "main")
+                br = (Config.load_effective(self._repo_path).github_base_branch.strip() or "main")
                 spec = f"origin/{br}:Database/{self._category.filename}"
                 txt = run_git(["git", "-C", self._repo_path, "show", spec], cwd=self._repo_path)
                 rdr = csv.DictReader((txt or "").splitlines())
@@ -1213,7 +1213,7 @@ class BrowseDialog(wx.Frame):
         finally:
             dlg.Destroy()
 
-        cfg = Config.load()
+        cfg = Config.load_effective(self._repo_path)
         if not (cfg.github_owner.strip() and cfg.github_repo.strip()):
             wx.MessageBox("GitHub is not configured. Click Settings… first.", "Add component", wx.OK | wx.ICON_WARNING)
             return
@@ -1224,7 +1224,7 @@ class BrowseDialog(wx.Frame):
             fields = {k: (v or "") for k, v in (row or {}).items() if str(k) != "IPN"}
             req_path = submit_request(cfg, action="add", payload={"category": self._category.display_name, "fields": fields}, commit_message=msg)
             try:
-                br = (Config.load().github_base_branch.strip() or "main")
+                br = (Config.load_effective(self._repo_path).github_base_branch.strip() or "main")
             except Exception:
                 br = "main"
             try:
@@ -1299,7 +1299,7 @@ class BrowseDialog(wx.Frame):
         if not set_fields:
             return
 
-        cfg = Config.load()
+        cfg = Config.load_effective(self._repo_path)
         if not (cfg.github_owner.strip() and cfg.github_repo.strip()):
             wx.MessageBox("GitHub is not configured. Click Settings… first.", "Edit component", wx.OK | wx.ICON_WARNING)
             return
@@ -1309,7 +1309,7 @@ class BrowseDialog(wx.Frame):
                 return
             req_path = submit_request(cfg, action="update", payload={"ipn": ipn, "set": dict(set_fields)}, commit_message=msg)
             try:
-                br = (Config.load().github_base_branch.strip() or "main")
+                br = (Config.load_effective(self._repo_path).github_base_branch.strip() or "main")
             except Exception:
                 br = "main"
             try:
@@ -1365,7 +1365,7 @@ class BrowseDialog(wx.Frame):
                     return
         except Exception:
             pass
-        cfg = Config.load()
+        cfg = Config.load_effective(self._repo_path)
         if not (cfg.github_owner.strip() and cfg.github_repo.strip()):
             wx.MessageBox("GitHub is not configured. Click Settings… first.", "Delete component", wx.OK | wx.ICON_WARNING)
             return
@@ -1375,7 +1375,7 @@ class BrowseDialog(wx.Frame):
                 return
             req_path = submit_request(cfg, action="delete", payload={"ipn": ipn}, commit_message=msg)
             try:
-                br = (Config.load().github_base_branch.strip() or "main")
+                br = (Config.load_effective(self._repo_path).github_base_branch.strip() or "main")
             except Exception:
                 br = "main"
             try:
@@ -1782,7 +1782,7 @@ class ComponentPickerDialog(wx.Dialog):
                 pass
 
     def _on_fetch_remote(self, _evt: wx.CommandEvent) -> None:
-        branch = (Config.load().github_base_branch.strip() or "main")
+        branch = (Config.load_effective(self._repo_path).github_base_branch.strip() or "main")
         self._set_busy(True, "Fetching remote...")
 
         def worker() -> None:
@@ -1819,7 +1819,7 @@ class ComponentPickerDialog(wx.Dialog):
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_sync_library(self, _evt: wx.CommandEvent) -> None:
-        branch = (Config.load().github_base_branch.strip() or "main")
+        branch = (Config.load_effective(self._repo_path).github_base_branch.strip() or "main")
         self._set_busy(True, "Syncing library...")
 
         def worker() -> None:
@@ -1877,7 +1877,7 @@ class ComponentPickerDialog(wx.Dialog):
                 self.status_lbl.SetLabel("Library status: unknown / stale" + suffix)
             elif bool(st.get("up_to_date")):
                 self.status_icon.SetBitmap(self._bmp_green)
-                br = (Config.load().github_base_branch.strip() or "main")
+                br = (Config.load_effective(self._repo_path).github_base_branch.strip() or "main")
                 self.status_lbl.SetLabel(f"Library status: synchronized with origin/{br}")
             elif dirty:
                 self.status_icon.SetBitmap(self._bmp_yellow)
@@ -1935,7 +1935,7 @@ class ComponentPickerDialog(wx.Dialog):
         def worker() -> None:
             remote_by_ipn: dict[str, dict[str, str]] | None = None
             try:
-                br = (Config.load().github_base_branch.strip() or "main")
+                br = (Config.load_effective(self._repo_path).github_base_branch.strip() or "main")
                 spec = f"origin/{br}:Database/{self._category.filename}"
                 txt = run_git(["git", "-C", self._repo_path, "show", spec], cwd=self._repo_path)
                 rdr = csv.DictReader((txt or "").splitlines())
@@ -2132,6 +2132,23 @@ class ComponentPickerDialog(wx.Dialog):
         if self._list.GetItemCount() > 0:
             try:
                 self._list.SelectRow(0)
+            except Exception:
+                pass
+            # Selecting the first row programmatically does not always emit
+            # EVT_DATAVIEW_SELECTION_CHANGED on all platforms/wx builds.
+            # Ensure the preview reflects the default selection.
+            try:
+                self._on_row_selected(None)
+            except Exception:
+                pass
+        else:
+            # Ensure previews clear when the list becomes empty (e.g. after filtering).
+            try:
+                self._selected = None
+            except Exception:
+                pass
+            try:
+                self._update_previews(rebuild_choice=True)
             except Exception:
                 pass
 

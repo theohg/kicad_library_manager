@@ -573,7 +573,7 @@ class AssetBrowserDialogBase(wx.Dialog):
         br0 = "main"
         try:
             if Config is not None:
-                br0 = (Config.load().github_base_branch or "main").strip() or "main"
+                br0 = (Config.load_effective(self._repo_path).github_base_branch or "main").strip() or "main"
         except Exception:
             br0 = "main"
 
@@ -623,7 +623,7 @@ class AssetBrowserDialogBase(wx.Dialog):
             from ...config import Config
 
             try:
-                br = (Config.load().github_base_branch or "main").strip() or "main"
+                br = (Config.load_effective(self._repo_path).github_base_branch or "main").strip() or "main"
             except Exception:
                 br = "main"
 
@@ -729,7 +729,7 @@ class AssetBrowserDialogBase(wx.Dialog):
             from ...config import Config
 
             try:
-                br = (Config.load().github_base_branch or "main").strip() or "main"
+                br = (Config.load_effective(self._repo_path).github_base_branch or "main").strip() or "main"
             except Exception:
                 br = "main"
             run_git(["git", "fetch", "origin", br, "--quiet"], cwd=self._repo_path)

@@ -123,7 +123,7 @@ def git_last_updated_epoch_by_path(repo_path: str, paths: list[str], ref: str | 
 
     if not ref:
         try:
-            br = (Config.load().github_base_branch or "main").strip() or "main"
+            br = (Config.load_effective(repo_path).github_base_branch or "main").strip() or "main"
         except Exception:
             br = "main"
         ref = f"origin/{br}"
@@ -161,7 +161,7 @@ def git_last_updated_epoch(repo_path: str, path: str, ref: str | None = None) ->
     try:
         if not ref:
             try:
-                br = (Config.load().github_base_branch or "main").strip() or "main"
+                br = (Config.load_effective(repo_path).github_base_branch or "main").strip() or "main"
             except Exception:
                 br = "main"
             ref = f"origin/{br}"
@@ -513,7 +513,7 @@ def git_sync_status(repo_path: str) -> dict[str, object]:
         return out
 
     try:
-        br = (Config.load().github_base_branch or "main").strip() or "main"
+        br = (Config.load_effective(repo_path).github_base_branch or "main").strip() or "main"
     except Exception:
         br = "main"
     counts = run_git(["git", "rev-list", "--left-right", "--count", f"HEAD...origin/{br}"], cwd=repo_path)
