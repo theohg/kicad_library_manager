@@ -7,6 +7,8 @@ An IPC plugin for KiCad for managing local database (sqlite libraries) across ma
 - browse/edit parts and browse symbols/footprints with previews
 - initialize a brand-new database repo with the required CI scaffolding
 
+**Requirements:** Python 3.12+ (bundled with KiCad 9)
+
 ---
 
 ### 1) Install the plugin
