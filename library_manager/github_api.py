@@ -8,6 +8,8 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
+from ._subprocess import SUBPROCESS_NO_WINDOW
+
 
 GITHUB_API = "https://api.github.com"
 
@@ -64,6 +66,7 @@ def get_token() -> str:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
+            **SUBPROCESS_NO_WINDOW,
         )
         tok = (cp.stdout or "").strip()
         if tok:

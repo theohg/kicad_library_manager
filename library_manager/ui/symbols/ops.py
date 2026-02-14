@@ -7,6 +7,7 @@ import tempfile
 import time
 
 from .libcache import SYMBOL_LIBCACHE, resolve_symbol_lib_path
+from ..._subprocess import SUBPROCESS_NO_WINDOW
 
 
 def extract_kicad_symbol_meta(sym_lib_path: str, symbol_name: str) -> tuple[str, str]:
@@ -143,6 +144,7 @@ def render_symbol_svg(repo_path: str, sym_ref: str, out_svg_path: str) -> None:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            **SUBPROCESS_NO_WINDOW,
         )
         if cp.returncode != 0:
             raise RuntimeError((cp.stdout or "").strip() or "kicad-cli sym export failed")

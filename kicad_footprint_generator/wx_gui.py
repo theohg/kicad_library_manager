@@ -18,6 +18,14 @@ except Exception:
     UiDebouncer = None  # type: ignore
 
 try:
+    from library_manager._subprocess import SUBPROCESS_NO_WINDOW  # type: ignore
+except Exception:
+    import sys as _sys
+    SUBPROCESS_NO_WINDOW: dict = {}
+    if _sys.platform == "win32":
+        SUBPROCESS_NO_WINDOW = {"creationflags": subprocess.CREATE_NO_WINDOW}
+
+try:
     # Reuse the preview widget + caching pipeline from the parts manager UI.
     from library_manager.ui.preview_panel import PreviewPanel  # type: ignore
 except Exception:
@@ -1533,6 +1541,7 @@ class FootprintGeneratorDialog(wx.Frame):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                **SUBPROCESS_NO_WINDOW,
             )
             if cp.returncode != 0:
                 raise RuntimeError((cp.stdout or "").strip() or "kicad-cli fp export failed")

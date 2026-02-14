@@ -5,6 +5,7 @@ import tempfile
 import time
 
 from .libcache import FP_LIBCACHE, resolve_footprint_pretty_dir as _resolve_footprint_pretty_dir_cached
+from ..._subprocess import SUBPROCESS_NO_WINDOW
 
 
 def find_pretty_dir_repo_local(repo_path: str, lib: str) -> str | None:
@@ -111,6 +112,7 @@ def render_footprint_svg(repo_path: str, fp_ref: str, out_svg_path: str) -> None
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
+            **SUBPROCESS_NO_WINDOW,
         )
         if cp.returncode != 0:
             cp2 = subprocess.run(
@@ -119,6 +121,7 @@ def render_footprint_svg(repo_path: str, fp_ref: str, out_svg_path: str) -> None
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                **SUBPROCESS_NO_WINDOW,
             )
             if cp2.returncode != 0:
                 cp3 = subprocess.run(
@@ -127,6 +130,7 @@ def render_footprint_svg(repo_path: str, fp_ref: str, out_svg_path: str) -> None
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
+                    **SUBPROCESS_NO_WINDOW,
                 )
                 if cp3.returncode != 0:
                     raise RuntimeError(

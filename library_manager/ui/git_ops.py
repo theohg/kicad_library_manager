@@ -6,6 +6,7 @@ import threading
 import time
 
 from ..config import Config
+from .._subprocess import SUBPROCESS_NO_WINDOW
 
 
 _GIT_LOCK = threading.Lock()
@@ -28,6 +29,7 @@ def run_git(args: list[str], cwd: str) -> str:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                **SUBPROCESS_NO_WINDOW,
             )
             return (int(cp.returncode), (cp.stdout or "").strip())
 
@@ -62,6 +64,7 @@ def git_object_exists(repo_path: str, spec: str) -> bool:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 text=True,
+                **SUBPROCESS_NO_WINDOW,
             )
         return cp.returncode == 0
     except Exception:
@@ -87,6 +90,7 @@ def git_ls_remote_head_sha(repo_path: str, *, remote: str = "origin", branch: st
                 text=True,
                 env=env,
                 timeout=max(0.1, float(timeout_s)),
+                **SUBPROCESS_NO_WINDOW,
             )
     except subprocess.TimeoutExpired as e:
         raise RuntimeError(f"git ls-remote timed out after {timeout_s}s") from e
@@ -248,6 +252,7 @@ def git_status_entries(repo_path: str) -> list[tuple[str, str]]:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=False,
+            **SUBPROCESS_NO_WINDOW,
         )
     if cp.returncode != 0:
         try:
@@ -460,6 +465,7 @@ def git_diff_name_status(repo_path: str, a: str, b: str, paths: list[str]) -> li
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=False,
+            **SUBPROCESS_NO_WINDOW,
         )
     if cp.returncode != 0:
         try:

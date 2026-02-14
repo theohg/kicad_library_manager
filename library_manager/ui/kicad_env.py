@@ -4,6 +4,8 @@ import os
 import subprocess
 import threading
 
+from .._subprocess import SUBPROCESS_NO_WINDOW
+
 
 _KICAD_ENV_LOCK = threading.Lock()
 _KICAD_ENV_VARS: dict[str, str] | None = None
@@ -23,6 +25,7 @@ def kicad_cli_env_vars() -> dict[str, str]:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                **SUBPROCESS_NO_WINDOW,
             )
         except Exception:
             continue
