@@ -1540,7 +1540,8 @@ class FootprintGeneratorDialog(wx.Frame):
                 check=False,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                text=True,
+                encoding="utf-8",
+                errors="replace",
                 **SUBPROCESS_NO_WINDOW,
             )
             if cp.returncode != 0:

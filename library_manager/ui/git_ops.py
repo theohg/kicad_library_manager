@@ -28,7 +28,8 @@ def run_git(args: list[str], cwd: str) -> str:
                 check=False,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                text=True,
+                encoding="utf-8",
+                errors="replace",
                 **SUBPROCESS_NO_WINDOW,
             )
             return (int(cp.returncode), (cp.stdout or "").strip())
@@ -63,7 +64,8 @@ def git_object_exists(repo_path: str, spec: str) -> bool:
                 check=False,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                text=True,
+                encoding="utf-8",
+                errors="replace",
                 **SUBPROCESS_NO_WINDOW,
             )
         return cp.returncode == 0
@@ -87,7 +89,8 @@ def git_ls_remote_head_sha(repo_path: str, *, remote: str = "origin", branch: st
                 check=False,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                text=True,
+                encoding="utf-8",
+                errors="replace",
                 env=env,
                 timeout=max(0.1, float(timeout_s)),
                 **SUBPROCESS_NO_WINDOW,

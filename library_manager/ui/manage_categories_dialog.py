@@ -443,7 +443,7 @@ class ManageCategoriesDialog(wx.Dialog):
         top.Add(self._status_lbl, 1, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 6)
         top.AddStretchSpacer(1)
         self._fetch_btn = wx.Button(self, label="↓  Fetch remote")
-        self._sync_btn = wx.Button(self, label="🗘  Sync library")
+        self._sync_btn = wx.Button(self, label="↻  Sync library")
         self._fetch_btn.Bind(wx.EVT_BUTTON, self._on_fetch_remote)
         self._sync_btn.Bind(wx.EVT_BUTTON, self._on_sync_library)
         top.Add(self._fetch_btn, 0, wx.ALL, 6)

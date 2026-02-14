@@ -111,7 +111,8 @@ def render_footprint_svg(repo_path: str, fp_ref: str, out_svg_path: str) -> None
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             **SUBPROCESS_NO_WINDOW,
         )
         if cp.returncode != 0:
@@ -120,7 +121,8 @@ def render_footprint_svg(repo_path: str, fp_ref: str, out_svg_path: str) -> None
                 check=False,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                text=True,
+                encoding="utf-8",
+                errors="replace",
                 **SUBPROCESS_NO_WINDOW,
             )
             if cp2.returncode != 0:
@@ -129,7 +131,8 @@ def render_footprint_svg(repo_path: str, fp_ref: str, out_svg_path: str) -> None
                     check=False,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
-                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     **SUBPROCESS_NO_WINDOW,
                 )
                 if cp3.returncode != 0:

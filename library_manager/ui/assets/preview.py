@@ -124,7 +124,7 @@ def svg_to_png(svg_path: str, out_png_path: str, width: int, height: int) -> Non
 
     rsvg = shutil.which("rsvg-convert")
     if rsvg:
-        cp = subprocess.run([rsvg, "-w", str(w), "-h", str(h), "-o", tmp_png, svg_path], check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, **SUBPROCESS_NO_WINDOW)
+        cp = subprocess.run([rsvg, "-w", str(w), "-h", str(h), "-o", tmp_png, svg_path], check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, encoding="utf-8", errors="replace", **SUBPROCESS_NO_WINDOW)
         if cp.returncode == 0 and os.path.exists(tmp_png) and os.path.getsize(tmp_png) > 0:
             os.replace(tmp_png, out_png_path)
             return
@@ -132,7 +132,7 @@ def svg_to_png(svg_path: str, out_png_path: str, width: int, height: int) -> Non
 
     inkscape = shutil.which("inkscape")
     if inkscape:
-        cp = subprocess.run([inkscape, svg_path, "-w", str(w), "-h", str(h), "-o", tmp_png], check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, **SUBPROCESS_NO_WINDOW)
+        cp = subprocess.run([inkscape, svg_path, "-w", str(w), "-h", str(h), "-o", tmp_png], check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, encoding="utf-8", errors="replace", **SUBPROCESS_NO_WINDOW)
         if cp.returncode == 0 and os.path.exists(tmp_png) and os.path.getsize(tmp_png) > 0:
             os.replace(tmp_png, out_png_path)
             return
@@ -140,7 +140,7 @@ def svg_to_png(svg_path: str, out_png_path: str, width: int, height: int) -> Non
 
     magick = shutil.which("magick") or shutil.which("convert")
     if magick:
-        cp = subprocess.run([magick, svg_path, "-resize", f"{w}x{h}", tmp_png], check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, **SUBPROCESS_NO_WINDOW)
+        cp = subprocess.run([magick, svg_path, "-resize", f"{w}x{h}", tmp_png], check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, encoding="utf-8", errors="replace", **SUBPROCESS_NO_WINDOW)
         if cp.returncode == 0 and os.path.exists(tmp_png) and os.path.getsize(tmp_png) > 0:
             os.replace(tmp_png, out_png_path)
             return

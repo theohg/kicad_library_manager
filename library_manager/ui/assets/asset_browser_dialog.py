@@ -204,7 +204,7 @@ class AssetBrowserDialogBase(wx.Dialog):
         self.fetch_btn = wx.Button(self, label="↓  Fetch remote")
         self.fetch_btn.Bind(wx.EVT_BUTTON, lambda _e: self._fetch_remote_async_notify_parent())
         top.Add(self.fetch_btn, 0, wx.ALL, 6)
-        self.sync_btn = wx.Button(self, label="🗘  Sync library")
+        self.sync_btn = wx.Button(self, label="↻  Sync library")
         self.sync_btn.Bind(wx.EVT_BUTTON, self._on_sync)
         top.Add(self.sync_btn, 0, wx.ALL, 6)
         v.Add(top, 0, wx.EXPAND)

@@ -108,7 +108,7 @@ class MainDialog(wx.Frame):
         self.refresh_btn = wx.Button(self, label="↓  Fetch remote")
         self.refresh_btn.Bind(wx.EVT_BUTTON, self._on_refresh_status)
         top.Add(self.refresh_btn, 0, wx.ALL, 6)
-        self.sync_btn = wx.Button(self, label="🗘  Sync library")
+        self.sync_btn = wx.Button(self, label="↻  Sync library")
         self.sync_btn.Bind(wx.EVT_BUTTON, self._on_sync)
         top.Add(self.sync_btn, 0, wx.ALL, 6)
         vbox.Add(top, 0, wx.EXPAND)

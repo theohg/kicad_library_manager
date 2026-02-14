@@ -3,7 +3,9 @@ from __future__ import annotations
 import base64
 import json
 import os
+import shutil
 import subprocess
+import sys
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -25,54 +27,125 @@ class GitHubError(RuntimeError):
     pass
 
 
+def _gh_hosts_yml_candidates() -> list[str]:
+    """
+    Return candidate paths for the gh CLI hosts.yml config file.
+
+    gh stores its config in different locations per platform:
+      - Linux/macOS: ~/.config/gh/hosts.yml  (XDG_CONFIG_HOME/gh/)
+      - Windows:     %APPDATA%/GitHub CLI/hosts.yml
+    """
+    paths: list[str] = []
+    # GH_CONFIG_DIR overrides everything (all platforms).
+    gh_config = (os.environ.get("GH_CONFIG_DIR") or "").strip()
+    if gh_config:
+        paths.append(os.path.join(gh_config, "hosts.yml"))
+    # Windows: %APPDATA%\GitHub CLI
+    appdata = (os.environ.get("APPDATA") or "").strip()
+    if appdata:
+        paths.append(os.path.join(appdata, "GitHub CLI", "hosts.yml"))
+    # XDG / Linux / macOS default
+    xdg = (os.environ.get("XDG_CONFIG_HOME") or "").strip()
+    if xdg:
+        paths.append(os.path.join(xdg, "gh", "hosts.yml"))
+    paths.append(os.path.join(os.path.expanduser("~"), ".config", "gh", "hosts.yml"))
+    return paths
+
+
 def _read_gh_hosts_token() -> str | None:
-    # ~/.config/gh/hosts.yml contains oauth_token for github.com.
-    path = os.path.join(os.path.expanduser("~"), ".config", "gh", "hosts.yml")
+    # Try each candidate location for the gh CLI hosts.yml config.
+    for path in _gh_hosts_yml_candidates():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                txt = f.read()
+        except Exception:
+            continue
+
+        in_github = False
+        for raw in txt.splitlines():
+            line = raw.rstrip("\n")
+            if not line.strip() or line.strip().startswith("#"):
+                continue
+            if not line.startswith(" ") and line.strip().endswith(":"):
+                host = line.strip()[:-1]
+                in_github = host == "github.com"
+                continue
+            if in_github and "oauth_token:" in line:
+                _, v = line.split("oauth_token:", 1)
+                token = v.strip().strip('"').strip("'")
+                if token:
+                    return token
+    return None
+
+
+def _find_gh_executable() -> str | None:
+    """
+    Locate the ``gh`` CLI executable.
+
+    On Windows, KiCad may not inherit the full user PATH, so ``shutil.which``
+    can fail even when ``gh`` is installed.  Fall back to common install locations.
+    """
+    found = shutil.which("gh")
+    if found:
+        return found
+    if sys.platform != "win32":
+        return None
+    # Common Windows install locations for gh CLI.
+    candidates: list[str] = []
+    pf = os.environ.get("ProgramFiles") or r"C:\Program Files"
+    pf86 = os.environ.get("ProgramFiles(x86)") or r"C:\Program Files (x86)"
+    localappdata = os.environ.get("LOCALAPPDATA") or ""
+    userprofile = os.environ.get("USERPROFILE") or ""
+    candidates.append(os.path.join(pf, "GitHub CLI", "gh.exe"))
+    candidates.append(os.path.join(pf86, "GitHub CLI", "gh.exe"))
+    if localappdata:
+        candidates.append(os.path.join(localappdata, "Programs", "GitHub CLI", "gh.exe"))
+    if userprofile:
+        candidates.append(os.path.join(userprofile, "scoop", "shims", "gh.exe"))
+    choco = os.environ.get("ChocolateyInstall") or ""
+    if choco:
+        candidates.append(os.path.join(choco, "bin", "gh.exe"))
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    return None
+
+
+def _gh_auth_token() -> str | None:
+    """
+    Try to retrieve a GitHub token via ``gh auth token``.
+    """
+    gh = _find_gh_executable()
+    if not gh:
+        return None
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            txt = f.read()
+        cp = subprocess.run(
+            [gh, "auth", "token"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            encoding="utf-8",
+            errors="replace",
+            **SUBPROCESS_NO_WINDOW,
+        )
+        tok = (cp.stdout or "").strip()
+        return tok if tok else None
     except Exception:
         return None
-
-    in_github = False
-    for raw in txt.splitlines():
-        line = raw.rstrip("\n")
-        if not line.strip() or line.strip().startswith("#"):
-            continue
-        if not line.startswith(" ") and line.strip().endswith(":"):
-            host = line.strip()[:-1]
-            in_github = host == "github.com"
-            continue
-        if in_github and "oauth_token:" in line:
-            _, v = line.split("oauth_token:", 1)
-            token = v.strip().strip('"').strip("'")
-            return token or None
-    return None
 
 
 def get_token() -> str:
     # Priority:
     # 1) env var (allows CI/testing)
-    # 2) gh CLI
+    # 2) gh CLI (tries PATH, then common install locations on Windows)
     # 3) gh config file
     env = os.environ.get("GITHUB_TOKEN") or os.environ.get("KICAD_LIBRARY_MANAGER_GITHUB_TOKEN")
     if env:
         return env.strip()
 
-    try:
-        cp = subprocess.run(
-            ["gh", "auth", "token"],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            **SUBPROCESS_NO_WINDOW,
-        )
-        tok = (cp.stdout or "").strip()
-        if tok:
-            return tok
-    except Exception:
-        pass
+    tok = _gh_auth_token()
+    if tok:
+        return tok
 
     tok = _read_gh_hosts_token()
     if tok:

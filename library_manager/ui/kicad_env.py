@@ -24,7 +24,8 @@ def kicad_cli_env_vars() -> dict[str, str]:
                 check=False,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                text=True,
+                encoding="utf-8",
+                errors="replace",
                 **SUBPROCESS_NO_WINDOW,
             )
         except Exception:
