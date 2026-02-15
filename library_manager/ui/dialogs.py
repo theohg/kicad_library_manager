@@ -84,9 +84,9 @@ class RepoSettingsDialog(wx.Dialog):
         # Remote fetch staleness threshold (minutes).
         grid.Add(wx.StaticText(self, label="Fetch stale timeout (minutes)"), 0, wx.ALIGN_CENTER_VERTICAL)
         try:
-            v = int(getattr(cfg, "fetch_stale_minutes", 5) or 5)
+            v = int(getattr(cfg, "fetch_stale_minutes", 30) or 30)
         except Exception:
-            v = 5
+            v = 30
         if v < 1:
             v = 1
         self.fetch_stale_minutes = wx.SpinCtrl(self, min=1, max=1440, initial=v)

@@ -42,7 +42,7 @@ class Config:
     dbl_filename: str = ""
     # Treat remote status as "stale" if FETCH_HEAD is older than this many minutes.
     # This avoids doing expensive diff/status work when we haven't fetched recently.
-    fetch_stale_minutes: int = 5
+    fetch_stale_minutes: int = 30
 
     @staticmethod
     def repo_settings_path(repo_path: str) -> str:
@@ -191,7 +191,7 @@ class Config:
                 github_repo=str(data.get("github_repo", "")),
                 github_base_branch=str(data.get("github_base_branch", "main")),
                 dbl_filename=str(data.get("dbl_filename", "")),
-                fetch_stale_minutes=int(data.get("fetch_stale_minutes", 5) or 5),
+                fetch_stale_minutes=int(data.get("fetch_stale_minutes", 30) or 30),
             )
         except FileNotFoundError:
             return Config()

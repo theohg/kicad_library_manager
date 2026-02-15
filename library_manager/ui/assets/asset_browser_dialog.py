@@ -24,7 +24,7 @@ except Exception:
     _wxdv = None
 
 from ..async_ui import UiDebouncer, UiRepeater, WindowTaskRunner
-from ..git_ops import fetch_stale_threshold_seconds, format_age_minutes, git_fetch_head_age_seconds, git_last_updated_epoch
+from ..git_ops import fetch_stale_threshold_seconds, format_age_minutes, git_fetch_head_age_seconds, git_last_updated_epoch, is_fetch_head_stale
 from ..icons import make_status_bitmap
 from .debuglog import log_line as _dbg
 from ..preview_panel import PreviewPanel
@@ -969,7 +969,7 @@ class AssetBrowserDialogBase(wx.Dialog):
         except Exception:
             local = None
         age = git_fetch_head_age_seconds(self._repo_path)
-        stale = (age is None) or (age > fetch_stale_threshold_seconds(self._repo_path))
+        stale = is_fetch_head_stale(self._repo_path, age)
         if stale:
             suffix = f" (last fetch {format_age_minutes(age)})" if age is not None else ""
             msg = f"{(local.msg if local else f'Local {self._p.scope_key}: unavailable')} — Remote {self._p.scope_key}: unknown / stale{suffix}"
@@ -1685,7 +1685,7 @@ class AssetBrowserDialogBase(wx.Dialog):
             return
 
         age = git_fetch_head_age_seconds(self._repo_path)
-        stale = (age is None) or (age > fetch_stale_threshold_seconds(self._repo_path))
+        stale = is_fetch_head_stale(self._repo_path, age)
         if stale:
             suffix = f" (last fetch {format_age_minutes(age)})" if age is not None else ""
             self.prev_updated.SetLabel("Last updated (remote): unknown / stale — fetch remote" + suffix)

@@ -4,9 +4,12 @@ import os
 import subprocess
 import threading
 import time
+import hashlib as _hashlib
+import json as _json
 
 from ..config import Config
 from .._subprocess import SUBPROCESS_NO_WINDOW
+from .cache_dir import plugin_cache_dir
 
 
 _GIT_LOCK = threading.Lock()
@@ -206,6 +209,72 @@ def git_fetch_head_age_seconds(repo_path: str) -> int | None:
         return None
 
 
+def _remote_sha_cache_key(repo_path: str, branch: str) -> str:
+    rp = os.path.abspath(str(repo_path or "").strip())
+    br = str(branch or "").strip() or "main"
+    raw = (rp + "\n" + br).encode("utf-8", errors="ignore")
+    return _hashlib.sha256(raw).hexdigest()[:24]
+
+
+def _remote_sha_cache_path(repo_path: str, branch: str) -> str:
+    key = _remote_sha_cache_key(repo_path, branch)
+    return os.path.join(plugin_cache_dir(), f"remote_sha_{key}.json")
+
+
+def write_remote_head_sha_cache(repo_path: str, *, branch: str, remote_sha: str) -> None:
+    """
+    Persist last successful `ls-remote` SHA so other windows can reason about freshness
+    without doing extra network calls.
+    """
+    rp = os.path.abspath(str(repo_path or "").strip())
+    br = str(branch or "").strip() or "main"
+    sha = str(remote_sha or "").strip()
+    if not (rp and sha):
+        return
+    payload = {
+        "version": 1,
+        "repo_path": rp,
+        "branch": br,
+        "remote_sha": sha,
+        "checked_ts": float(time.time()),
+    }
+    try:
+        with open(_remote_sha_cache_path(rp, br), "w", encoding="utf-8", newline="\n") as f:
+            f.write(_json.dumps(payload, indent=2, sort_keys=True))
+            f.write("\n")
+    except Exception:
+        return
+
+
+def read_remote_head_sha_cache(repo_path: str, *, branch: str) -> dict[str, object] | None:
+    rp = os.path.abspath(str(repo_path or "").strip())
+    br = str(branch or "").strip() or "main"
+    try:
+        p = _remote_sha_cache_path(rp, br)
+        if not os.path.isfile(p):
+            return None
+        with open(p, "r", encoding="utf-8", errors="ignore") as f:
+            d = _json.loads(f.read() or "{}")
+        return d if isinstance(d, dict) else None
+    except Exception:
+        return None
+
+
+def local_remote_tracking_sha(repo_path: str, *, branch: str) -> str | None:
+    """
+    Return the SHA for refs/remotes/origin/<branch> if it exists locally.
+    """
+    rp = os.path.abspath(str(repo_path or "").strip())
+    br = str(branch or "").strip() or "main"
+    if not rp:
+        return None
+    try:
+        out = run_git(["git", "-C", rp, "rev-parse", "--verify", f"origin/{br}"], cwd=rp).strip()
+        return out if out else None
+    except Exception:
+        return None
+
+
 def fetch_stale_threshold_seconds(repo_path: str | None = None) -> int:
     """
     Return how old FETCH_HEAD can be before we consider remote status "stale".
@@ -227,12 +296,43 @@ def fetch_stale_threshold_seconds(repo_path: str | None = None) -> int:
 
 def is_fetch_head_stale(repo_path: str, age_s: int | None) -> bool:
     """
-    True if FETCH_HEAD is missing/unknown or older than configured threshold.
+    True if we should treat remote-derived UI as unknown/stale.
+
+    Hybrid logic:
+    - If we have a *recent* cached `ls-remote` SHA for origin/<branch>, compare it to the local
+      remote-tracking ref `origin/<branch>`. If they match, remote info is valid even if
+      FETCH_HEAD mtime is old.
+    - If they differ, remote info is stale (we know we should fetch).
+    - If we can't get a remote SHA (offline/auth/never checked) or it's too old, fall back to
+      the time-based FETCH_HEAD age heuristic.
     """
+    rp = os.path.abspath(str(repo_path or "").strip())
+    if not rp:
+        return True
+
+    # Prefer state-based freshness when we have a recent remote SHA check.
+    try:
+        br = (Config.load_effective(rp).github_base_branch or "main").strip() or "main"
+    except Exception:
+        br = "main"
+    try:
+        d = read_remote_head_sha_cache(rp, branch=br) or {}
+        remote_sha = str(d.get("remote_sha", "") or "").strip()
+        checked_ts = float(d.get("checked_ts") or 0.0)
+        if remote_sha and checked_ts:
+            max_age = float(fetch_stale_threshold_seconds(rp))
+            if (time.time() - checked_ts) <= max_age:
+                local_sha = local_remote_tracking_sha(rp, branch=br)
+                if local_sha:
+                    return local_sha.strip() != remote_sha
+    except Exception:
+        pass
+
+    # Fallback: time-based.
     if age_s is None:
         return True
     try:
-        return int(age_s) > int(fetch_stale_threshold_seconds(repo_path))
+        return int(age_s) > int(fetch_stale_threshold_seconds(rp))
     except Exception:
         return True
 

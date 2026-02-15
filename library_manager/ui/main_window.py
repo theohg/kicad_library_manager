@@ -27,6 +27,9 @@ from .git_ops import (
     git_fetch_head_mtime,
     format_age_minutes,
     fetch_stale_threshold_seconds,
+    is_fetch_head_stale,
+    write_remote_head_sha_cache,
+    local_remote_tracking_sha,
     git_last_updated_epoch_by_path,
     git_log_last_commits_for_path,
     git_show_commit_for_path,
@@ -601,7 +604,35 @@ class MainDialog(wx.Frame):
                 except Exception:
                     self._remote_backoff_s = 60.0
                 return
+            # Cache last successful remote SHA (used to validate local origin/<branch> freshness
+            # even if FETCH_HEAD is old).
+            try:
+                branch2 = (self._cfg.github_base_branch or "main").strip() or "main"
+            except Exception:
+                branch2 = "main"
+            try:
+                write_remote_head_sha_cache(self._repo_path, branch=branch2, remote_sha=str(sha or "").strip())
+            except Exception:
+                pass
             self._remote_backoff_s = self._remote_poll_s
+            # Avoid an unnecessary fetch on startup when local origin/<branch> already matches remote.
+            try:
+                local_sha = local_remote_tracking_sha(self._repo_path, branch=branch2) or ""
+            except Exception:
+                local_sha = ""
+            if local_sha and str(local_sha).strip() == str(sha).strip():
+                self._last_remote_sha = sha
+                # Refresh UI now that stale heuristics can use the cached remote SHA.
+                try:
+                    self._refresh_sync_status()
+                    self._refresh_assets_status()
+                    self._reload_category_statuses()
+                    self._refresh_remote_cat_updated_times_async()
+                    self._refresh_categories_status_icon()
+                    self._refresh_selected_category_history_async()
+                except Exception:
+                    pass
+                return
             if sha != self._last_remote_sha:
                 self._last_remote_sha = sha
                 self._on_refresh_status(None)
@@ -789,7 +820,7 @@ class MainDialog(wx.Frame):
         local_sym = sorted(local_asset_paths(self._repo_path, ["Symbols"]))
 
         age = git_fetch_head_age_seconds(self._repo_path)
-        stale = (age is None) or (age > fetch_stale_threshold_seconds(self._repo_path))
+        stale = is_fetch_head_stale(self._repo_path, age)
         if stale:
             suffix = f" (last fetch {format_age_minutes(age)})" if age is not None else ""
             self.assets_icon.SetBitmap(self._bmp_yellow if local_all else self._bmp_red)
@@ -1618,7 +1649,7 @@ class MainDialog(wx.Frame):
         if bool(getattr(self, "_remote_cat_updated_loading", False)):
             return
         age = git_fetch_head_age_seconds(self._repo_path)
-        stale = (age is None) or (age > fetch_stale_threshold_seconds(self._repo_path))
+        stale = is_fetch_head_stale(self._repo_path, age)
         if stale:
             self._remote_cat_updated_ts_by_path = {}
             return

@@ -21,6 +21,7 @@ from .git_ops import (
     git_fetch_head_mtime,
     format_age_minutes,
     fetch_stale_threshold_seconds,
+    is_fetch_head_stale,
     git_status_entries,
     git_sync_ff_only,
     git_sync_status,
@@ -833,7 +834,7 @@ class BrowseDialog(wx.Dialog):
         if self._remote_loaded or self._remote_loading or self._closing:
             return
         age = git_fetch_head_age_seconds(self._repo_path)
-        if age is None or age > fetch_stale_threshold_seconds(self._repo_path):
+        if is_fetch_head_stale(self._repo_path, age):
             # Stale/unknown: don't try loading remote file.
             return
         self._remote_loading = True
@@ -1977,7 +1978,7 @@ class ComponentPickerDialog(wx.Dialog):
         if self._remote_loaded or self._remote_loading:
             return
         age = git_fetch_head_age_seconds(self._repo_path)
-        if age is None or age > fetch_stale_threshold_seconds(self._repo_path):
+        if is_fetch_head_stale(self._repo_path, age):
             # Stale/unknown: don't try loading remote file.
             return
         self._remote_loading = True
