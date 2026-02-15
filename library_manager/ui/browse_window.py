@@ -1120,7 +1120,8 @@ class BrowseDialog(wx.Dialog):
             for col in self._show_cols[1:]:
                 self._list.AppendTextColumn(str(col or ""), width=wx.COL_WIDTH_AUTOSIZE)
 
-            for row, src_i in zip(self._visible_rows, self._visible_src_idx, strict=False):
+            # `zip(strict=...)` is Python 3.10+; KiCad macOS bundles can be older.
+            for row, src_i in zip(self._visible_rows, self._visible_src_idx):
                 # icon column + remaining columns in the same order as self._show_cols[1:].
                 try:
                     ipn = str(row.get("IPN", "") or "").strip()

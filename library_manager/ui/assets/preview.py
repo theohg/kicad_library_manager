@@ -275,6 +275,7 @@ def hires_target_px(win: wx.Window, want_w: int, want_h: int, quality_scale: flo
 @dataclass(frozen=True)
 class CachedRaster:
     png_path: str
+    svg_path: str = ""
 
 
 def cached_svg_and_png(
@@ -298,6 +299,12 @@ def cached_svg_and_png(
     png_key = hash_key(f"{cache_key_prefix}_png:{PREVIEW_CACHE_VERSION}:{ref}:{source_mtime}:{png_w}x{png_h}")
     out_png = os.path.join(cache_dir(), kind_dir, safe_name(ref) + "_" + png_key + ".png")
     if not _file_ok(out_png):
-        svg_to_png(out_svg, out_png, png_w, png_h)
-    return CachedRaster(png_path=out_png)
+        try:
+            svg_to_png(out_svg, out_png, png_w, png_h)
+        except RuntimeError as e:
+            # macOS often lacks `rsvg-convert` / Inkscape. Allow a wxSVG UI-thread fallback.
+            if "No SVG->PNG converter found" in str(e):
+                return CachedRaster(png_path="", svg_path=out_svg)
+            raise
+    return CachedRaster(png_path=out_png, svg_path=out_svg)
 

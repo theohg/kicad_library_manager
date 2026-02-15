@@ -265,6 +265,7 @@ class PreviewPanel(wx.Panel):
 
         def worker() -> None:
             png_path = ""
+            svg_path = ""
             err: Exception | None = None
             try:
                 raster = cached_svg_and_png(
@@ -277,8 +278,9 @@ class PreviewPanel(wx.Panel):
                     render_svg=render_svg,
                 )
                 png_path = str(getattr(raster, "png_path", "") or "")
-                if not png_path:
-                    raise RuntimeError("PNG render failed")
+                svg_path = str(getattr(raster, "svg_path", "") or "")
+                if not png_path and not svg_path:
+                    raise RuntimeError("Preview render failed")
             except Exception as e:  # noqa: BLE001
                 err = e
 
@@ -291,14 +293,33 @@ class PreviewPanel(wx.Panel):
                     except Exception:
                         pass
                     return
-                if not png_path:
-                    return
                 try:
                     # IMPORTANT: wx objects must be created on the UI thread (KiCad/wx can segfault otherwise).
-                    img = wx_image_silent(png_path)
-                    if not img.IsOk():
-                        raise RuntimeError("PNG load failed")
-                    bmp = wx.Bitmap(img)
+                    bmp: wx.Bitmap | None = None
+                    if png_path:
+                        img = wx_image_silent(png_path)
+                        if not img.IsOk():
+                            raise RuntimeError("PNG load failed")
+                        bmp = wx.Bitmap(img)
+                    elif svg_path:
+                        # Fallback: render SVG directly using wx's SVG renderer (when available).
+                        try:
+                            import wx.svg as _wxsvg  # type: ignore
+                        except Exception:
+                            _wxsvg = None  # type: ignore
+                        if not _wxsvg:
+                            raise RuntimeError("No SVG->PNG converter found (install rsvg-convert or inkscape)")
+                        try:
+                            svg_img = _wxsvg.SVGimage.CreateFromFile(svg_path)
+                        except Exception as e:
+                            raise RuntimeError(f"SVG load failed: {e}") from e
+                        try:
+                            bmp = svg_img.ConvertToBitmap(int(png_w), int(png_h))
+                        except Exception:
+                            # Some wx builds provide ConvertToBitmap() without sizing.
+                            bmp = svg_img.ConvertToBitmap()
+                    if not bmp or not bmp.IsOk():
+                        raise RuntimeError("Bitmap render failed")
                     w, h = self.bmp.GetClientSize()
                     boxed = letterbox_bitmap(bmp, w, h, padding=self._letterbox_padding, crop_to_alpha=self._crop_to_alpha)
                     self.bmp.SetBitmap(boxed or bmp)

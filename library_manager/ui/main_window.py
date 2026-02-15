@@ -2252,7 +2252,8 @@ def _try_parse_single_csv_unified_diff(git_show_text: str) -> dict | None:
         if len(fields) != len(headers):
             return None
         out: dict[str, str] = {}
-        for h, v in zip(headers, fields, strict=False):
+        # `zip(strict=...)` is Python 3.10+; KiCad macOS bundles can be older.
+        for h, v in zip(headers, fields):
             out[str(h)] = str(v or "")
         return out
 
