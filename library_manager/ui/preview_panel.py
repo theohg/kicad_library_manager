@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import threading
 from typing import Callable
 
@@ -33,6 +34,7 @@ class PreviewPanel(wx.Panel):
         self._gen = 0
         self._closed = False
         self._crop_to_alpha = bool(crop_to_alpha)
+        self._install_hint_shown = False
         try:
             self._letterbox_padding = float(letterbox_padding)
         except Exception:
@@ -94,6 +96,58 @@ class PreviewPanel(wx.Panel):
         # Re-render at new size (debounced) if we have a last render request.
         try:
             self.bmp.Bind(wx.EVT_SIZE, self._on_bmp_size)
+        except Exception:
+            pass
+
+    def _maybe_prompt_preview_tools(self, err: Exception) -> None:
+        """
+        Best-effort one-time prompt when the host system lacks an SVG rasterizer.
+
+        We only prompt when the error indicates "no converter", to avoid spamming users for other failures.
+        """
+        if self._closed:
+            return
+        try:
+            if bool(self._install_hint_shown):
+                return
+        except Exception:
+            return
+        msg = str(err or "").strip()
+        if "No SVG->PNG converter found" not in msg:
+            return
+        try:
+            self._install_hint_shown = True
+        except Exception:
+            pass
+
+        plat = str(sys.platform or "").lower()
+        if plat.startswith("darwin"):
+            body = (
+                "Preview rendering needs an SVG rasterizer.\n\n"
+                "Recommended (Homebrew):\n"
+                "  brew install librsvg\n\n"
+                "Alternative:\n"
+                "  brew install --cask inkscape\n\n"
+                "Then restart KiCad."
+            )
+        elif plat.startswith("win"):
+            body = (
+                "Preview rendering needs an SVG rasterizer.\n\n"
+                "Recommended:\n"
+                "- Install Inkscape, then ensure `inkscape` is available on PATH.\n\n"
+                "Then restart KiCad."
+            )
+        else:
+            body = (
+                "Preview rendering needs an SVG rasterizer.\n\n"
+                "Try one of:\n"
+                "- Debian/Ubuntu:  sudo apt install librsvg2-bin\n"
+                "- Fedora:         sudo dnf install librsvg2-tools\n"
+                "- Arch:           sudo pacman -S librsvg\n\n"
+                "Then restart KiCad."
+            )
+        try:
+            wx.MessageBox(body, "Enable previews", wx.OK | wx.ICON_INFORMATION)
         except Exception:
             pass
 
@@ -292,6 +346,10 @@ class PreviewPanel(wx.Panel):
                         self.status.SetLabel(f"Preview unavailable: {err}")
                     except Exception:
                         pass
+                    try:
+                        self._maybe_prompt_preview_tools(err)
+                    except Exception:
+                        pass
                     return
                 try:
                     # IMPORTANT: wx objects must be created on the UI thread (KiCad/wx can segfault otherwise).
@@ -339,6 +397,10 @@ class PreviewPanel(wx.Panel):
                     # IMPORTANT: never leave the UI stuck at "Rendering…" on failure.
                     try:
                         self.status.SetLabel(f"Preview unavailable: {e}")
+                    except Exception:
+                        pass
+                    try:
+                        self._maybe_prompt_preview_tools(e)
                     except Exception:
                         pass
                     try:
