@@ -5,6 +5,7 @@ import hashlib
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 
@@ -122,7 +123,38 @@ def svg_to_png(svg_path: str, out_png_path: str, width: int, height: int) -> Non
     except Exception:
         pass
 
-    rsvg = shutil.which("rsvg-convert")
+    def _first_existing(cands: list[str]) -> str | None:
+        for p in cands:
+            try:
+                if p and os.path.isfile(p) and os.access(p, os.X_OK):
+                    return p
+            except Exception:
+                continue
+        return None
+
+    def _which(name: str, extra: list[str] | None = None) -> str | None:
+        p = shutil.which(name)
+        if p:
+            return p
+        return _first_existing(list(extra or []))
+
+    # macOS GUI apps often have a minimal PATH, so Homebrew-installed tools might not be found
+    # via `shutil.which()`. Probe common locations explicitly.
+    is_macos = str(sys.platform or "").lower().startswith("darwin")
+
+    rsvg_extra: list[str] = []
+    inkscape_extra: list[str] = []
+    magick_extra: list[str] = []
+    if is_macos:
+        rsvg_extra = ["/opt/homebrew/bin/rsvg-convert", "/usr/local/bin/rsvg-convert"]
+        inkscape_extra = [
+            "/Applications/Inkscape.app/Contents/MacOS/inkscape",
+            "/opt/homebrew/bin/inkscape",
+            "/usr/local/bin/inkscape",
+        ]
+        magick_extra = ["/opt/homebrew/bin/magick", "/usr/local/bin/magick", "/opt/homebrew/bin/convert", "/usr/local/bin/convert"]
+
+    rsvg = _which("rsvg-convert", rsvg_extra)
     if rsvg:
         cp = subprocess.run([rsvg, "-w", str(w), "-h", str(h), "-o", tmp_png, svg_path], check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, encoding="utf-8", errors="replace", **SUBPROCESS_NO_WINDOW)
         if cp.returncode == 0 and os.path.exists(tmp_png) and os.path.getsize(tmp_png) > 0:
@@ -130,7 +162,7 @@ def svg_to_png(svg_path: str, out_png_path: str, width: int, height: int) -> Non
             return
         raise RuntimeError((cp.stdout or "").strip() or "rsvg-convert failed")
 
-    inkscape = shutil.which("inkscape")
+    inkscape = _which("inkscape", inkscape_extra)
     if inkscape:
         cp = subprocess.run([inkscape, svg_path, "-w", str(w), "-h", str(h), "-o", tmp_png], check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, encoding="utf-8", errors="replace", **SUBPROCESS_NO_WINDOW)
         if cp.returncode == 0 and os.path.exists(tmp_png) and os.path.getsize(tmp_png) > 0:
@@ -138,7 +170,7 @@ def svg_to_png(svg_path: str, out_png_path: str, width: int, height: int) -> Non
             return
         raise RuntimeError((cp.stdout or "").strip() or "inkscape SVG export failed")
 
-    magick = shutil.which("magick") or shutil.which("convert")
+    magick = _which("magick", magick_extra) or _which("convert", magick_extra)
     if magick:
         cp = subprocess.run([magick, svg_path, "-resize", f"{w}x{h}", tmp_png], check=False, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, encoding="utf-8", errors="replace", **SUBPROCESS_NO_WINDOW)
         if cp.returncode == 0 and os.path.exists(tmp_png) and os.path.getsize(tmp_png) > 0:

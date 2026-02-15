@@ -17,6 +17,22 @@ _GIT_DIR_CACHE_LOCK = threading.Lock()
 _GIT_DIR_CACHE: dict[str, str] = {}
 
 
+def _git_env_no_prompt() -> dict[str, str]:
+    """
+    Environment for git subprocesses that must never block on interactive auth prompts.
+
+    On macOS/Windows, git may otherwise try to pop up GUI credential dialogs (or hang) when
+    run from within KiCad. We prefer to fail fast and show a clear error to the user.
+    """
+    env = dict(os.environ)
+    # Never prompt in terminal.
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    # Git Credential Manager (if present): never show UI prompts.
+    env["GCM_INTERACTIVE"] = "Never"
+    env["GCM_GUI_PROMPT"] = "0"
+    return env
+
+
 def run_git(args: list[str], cwd: str) -> str:
     """
     Run a git command, serialized by a process-local lock.
@@ -35,6 +51,7 @@ def run_git(args: list[str], cwd: str) -> str:
                 stderr=subprocess.STDOUT,
                 encoding="utf-8",
                 errors="replace",
+                env=_git_env_no_prompt(),
                 **SUBPROCESS_NO_WINDOW,
             )
             return (int(cp.returncode), (cp.stdout or "").strip())
@@ -71,6 +88,7 @@ def git_object_exists(repo_path: str, spec: str) -> bool:
                 stderr=subprocess.DEVNULL,
                 encoding="utf-8",
                 errors="replace",
+                env=_git_env_no_prompt(),
                 **SUBPROCESS_NO_WINDOW,
             )
         return cp.returncode == 0

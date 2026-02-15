@@ -358,7 +358,14 @@ class PreviewPanel(wx.Panel):
                         img = wx_image_silent(png_path)
                         if not img.IsOk():
                             raise RuntimeError("PNG load failed")
-                        bmp = wx.Bitmap(img)
+                        try:
+                            bmp = wx.Bitmap(img)
+                        except Exception:
+                            # Fallback: some wx ports fail to create a bitmap from a wx.Image.
+                            try:
+                                bmp = wx.Bitmap(png_path, wx.BITMAP_TYPE_PNG)
+                            except Exception as e:
+                                raise RuntimeError(f"PNG bitmap creation failed: {e}") from e
                     elif svg_path:
                         # Fallback: render SVG directly using wx's SVG renderer (when available).
                         try:
