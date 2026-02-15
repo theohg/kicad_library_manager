@@ -1328,13 +1328,26 @@ class AssetBrowserDialogBase(wx.Dialog):
     def _set_item_icon(self, item, idx: int | None) -> None:
         if idx is None:
             return
-        if self._tree_kind() == "dv":
+        kind = self._tree_kind()
+        if kind == "dv":
             try:
                 # wx.dataview.TreeListCtrl expects closed/opened image ids.
                 self.tree.SetItemImage(item, idx, idx)  # type: ignore[attr-defined]
             except Exception:
                 pass
             return
+        if kind == "adv":
+            # wx.adv.TreeListCtrl is picky about the overload it exposes across platforms/wx versions.
+            # Try a few signatures (normal + expanded), then fall back to the simplest.
+            try:
+                self.tree.SetItemImage(item, idx, wx.TreeItemIcon_Normal)  # type: ignore[attr-defined]
+                try:
+                    self.tree.SetItemImage(item, idx, wx.TreeItemIcon_Expanded)  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+                return
+            except Exception:
+                pass
         try:
             self.tree.SetItemImage(item, idx)  # type: ignore[attr-defined]
         except Exception:

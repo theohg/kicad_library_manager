@@ -455,10 +455,8 @@ class ManageCategoriesDialog(wx.Dialog):
         vbox.Add(wx.StaticText(self, label="Fields used across categories"), 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
 
         self._table = dv.DataViewListCtrl(self, style=dv.DV_ROW_LINES | dv.DV_VERT_RULES | dv.DV_HORIZ_RULES)
-        # NOTE: IconText columns can be noticeably laggy on some wx ports when changing selection
-        # (especially with many columns). Keep the status icon in the header strip and make the
-        # table itself plain text for responsiveness.
-        self._table.AppendTextColumn("Category", width=240, mode=dv.DATAVIEW_CELL_INERT)
+        # Status icon is shown next to each category name (legacy behavior).
+        self._table.AppendIconTextColumn("Category", width=240, mode=dv.DATAVIEW_CELL_INERT)
         self._table.AppendTextColumn("Status", width=120, mode=dv.DATAVIEW_CELL_INERT)
         vbox.Add(self._table, 1, wx.ALL | wx.EXPAND, 8)
 
@@ -536,7 +534,7 @@ class ManageCategoriesDialog(wx.Dialog):
         """
         Return selected category name from the matrix.
 
-        Note: column 0 is plain text; prefer GetTextValue().
+        Note: column 0 is a DataViewIconText, so GetTextValue() can be unreliable on some wx builds.
         """
         row = -1
         # Prefer selection->row mapping (most reliable across wx ports).
@@ -554,6 +552,14 @@ class ManageCategoriesDialog(wx.Dialog):
         if row < 0:
             return None
 
+        # Extract the category text from col0 (IconText).
+        try:
+            v = self._table.GetValue(row, 0)
+            if hasattr(v, "GetText"):
+                s = str(v.GetText() or "").strip()
+                return s.strip() or None
+        except Exception:
+            pass
         try:
             s2 = str(self._table.GetTextValue(row, 0) or "").strip()
             return s2.strip() or None
@@ -723,7 +729,7 @@ class ManageCategoriesDialog(wx.Dialog):
             pass
 
         # Recreate columns.
-        self._table.AppendTextColumn("Category", width=220, mode=dv.DATAVIEW_CELL_INERT)
+        self._table.AppendIconTextColumn("Category", width=220, mode=dv.DATAVIEW_CELL_INERT)
         self._table.AppendTextColumn("Status", width=120, mode=dv.DATAVIEW_CELL_INERT)
         for name in cols:
             w = max(90, min(180, 10 * max(6, len(name))))
@@ -742,7 +748,14 @@ class ManageCategoriesDialog(wx.Dialog):
         # Insert rows.
         for cat_name, used in fields_by_cat:
             status_txt = _status_for_cat(cat_name)
-            row = [str(cat_name or "").strip(), status_txt]
+            bmp = self._icon_for_status(status_txt)
+            ico = wx.Icon()
+            try:
+                ico.CopyFromBitmap(bmp)
+            except Exception:
+                ico = wx.Icon()
+            it = dv.DataViewIconText("  " + str(cat_name or "").strip(), ico)
+            row = [it, status_txt]
             for f in cols:
                 row.append("✖" if f in used else "")
             try:
