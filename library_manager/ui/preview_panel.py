@@ -335,8 +335,17 @@ class PreviewPanel(wx.Panel):
                                 self.status.SetLabel("")
                         except Exception:
                             pass
-                except Exception:
-                    pass
+                except Exception as e:
+                    # IMPORTANT: never leave the UI stuck at "Rendering…" on failure.
+                    try:
+                        self.status.SetLabel(f"Preview unavailable: {e}")
+                    except Exception:
+                        pass
+                    try:
+                        self.bmp.SetBitmap(wx.NullBitmap)
+                        self.bmp.Refresh()
+                    except Exception:
+                        pass
 
             try:
                 wx.CallAfter(done_on_ui)
