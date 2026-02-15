@@ -13,6 +13,8 @@ from .cache_dir import plugin_cache_dir
 
 
 _GIT_LOCK = threading.Lock()
+_GIT_DIR_CACHE_LOCK = threading.Lock()
+_GIT_DIR_CACHE: dict[str, str] = {}
 
 
 def run_git(args: list[str], cwd: str) -> str:
@@ -189,7 +191,24 @@ def _git_dir(repo_path: str) -> str:
     This is critical for submodules, where `.git` is often a *file* pointing at
     the real git dir.
     """
-    return run_git(["git", "-C", repo_path, "rev-parse", "--git-dir"], cwd=repo_path).strip()
+    rp = os.path.abspath(str(repo_path or "").strip())
+    if not rp:
+        return ""
+    try:
+        with _GIT_DIR_CACHE_LOCK:
+            cached = _GIT_DIR_CACHE.get(rp)
+        if cached:
+            return cached
+    except Exception:
+        cached = None
+    gd = run_git(["git", "-C", rp, "rev-parse", "--git-dir"], cwd=rp).strip()
+    try:
+        if gd:
+            with _GIT_DIR_CACHE_LOCK:
+                _GIT_DIR_CACHE[rp] = gd
+    except Exception:
+        pass
+    return gd
 
 
 def _git_file_path(repo_path: str, git_dir: str, name: str) -> str:

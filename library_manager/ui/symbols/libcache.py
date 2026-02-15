@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import json as _json
 import os
 import re
+import gzip as _gzip
+import hashlib as _hashlib
+import time as _time
+import subprocess as _subprocess
+import sys as _sys
 import threading
 from typing import Any
 
@@ -9,6 +15,7 @@ import wx
 
 from ...suggest import list_symbols
 from ..kicad_env import expand_kicad_uri, kicad_config_root, kicad_version_dir, prime_kicad_env_vars, project_root_from_repo
+from ..cache_dir import plugin_cache_dir
 
 
 def _extract_blocks(txt: str, needle: str) -> list[str]:
@@ -321,7 +328,46 @@ class SymbolLibraryCache:
         # We are the loader for this library.
         meta_map: dict[str, tuple[str, str]] = {}
         try:
-            meta_map = _scan_kicad_sym_file_meta(lib_path, lib)
+            # Prefer subprocess worker to avoid starving the wx UI thread via the GIL.
+            jobs = [{"lib": lib, "path": lib_path}]
+            try:
+                # __file__ = .../library_manager/ui/symbols/libcache.py
+                # Need PYTHONPATH to include the *parent* of `library_manager/`.
+                lm_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))  # .../library_manager
+                pkg_parent = os.path.dirname(lm_dir)
+            except Exception:
+                pkg_parent = ""
+            env = dict(os.environ)
+            if pkg_parent:
+                prev = str(env.get("PYTHONPATH") or "")
+                env["PYTHONPATH"] = (pkg_parent + (os.pathsep + prev if prev else ""))
+            cp = _subprocess.run(
+                [_sys.executable, "-m", "library_manager.ui.symbols.meta_worker"],
+                input=_json.dumps({"libs": jobs}),
+                check=False,
+                stdout=_subprocess.PIPE,
+                stderr=_subprocess.STDOUT,
+                encoding="utf-8",
+                errors="replace",
+                env=env,
+                timeout=max(1.0, float(wait_s or 10.0)),
+            )
+            if int(getattr(cp, "returncode", 1) or 1) == 0:
+                try:
+                    resp = _json.loads((cp.stdout or "").strip() or "{}")
+                except Exception:
+                    resp = {}
+                mm2 = resp.get("meta") if isinstance(resp, dict) else None
+                if isinstance(mm2, dict):
+                    for k, v in mm2.items():
+                        try:
+                            if isinstance(v, (list, tuple)) and len(v) >= 2:
+                                meta_map[str(k)] = (str(v[0] or ""), str(v[1] or ""))
+                        except Exception:
+                            continue
+            # Fallback: parse in-process if subprocess yielded nothing.
+            if not meta_map:
+                meta_map = _scan_kicad_sym_file_meta(lib_path, lib)
         except Exception:
             meta_map = {}
 
@@ -355,6 +401,126 @@ class SymbolLibraryCache:
         except Exception:
             pass
 
+    def prefetch_meta_subprocess(self, repo_path: str, libs: list[str], *, timeout_s: float | None = None) -> None:
+        """
+        Prefetch symbol (Description, Datasheet) metadata for multiple libs using a subprocess.
+
+        Rationale: CPU-heavy parsing in Python threads can still starve the wx UI thread due to
+        the GIL. Running the parsing in a separate process keeps the UI responsive.
+        """
+        repo_path = os.path.abspath(repo_path or "")
+        libs = [str(x or "").strip() for x in (libs or []) if str(x or "").strip()]
+        if not repo_path or not libs:
+            return
+
+        # Determine which libs are eligible and not already loaded.
+        with self._lock:
+            st = self._state_by_repo.get(repo_path) or {}
+            sym_files = dict(st.get("sym_lib_files") or {})
+            loaded_libs = st.get("sym_meta_loaded_libs")
+            if not isinstance(loaded_libs, set):
+                loaded_libs = set()
+                st["sym_meta_loaded_libs"] = loaded_libs
+            ev_map = st.get("sym_meta_events")
+            if not isinstance(ev_map, dict):
+                ev_map = {}
+                st["sym_meta_events"] = ev_map
+            self._state_by_repo[repo_path] = st
+
+        jobs: list[dict[str, str]] = []
+        for lib in libs:
+            if lib in loaded_libs:
+                continue
+            if lib in ev_map:
+                # Someone else is loading it.
+                continue
+            p = str(sym_files.get(lib) or "").strip()
+            if not (p and os.path.exists(p)):
+                continue
+            jobs.append({"lib": lib, "path": p})
+        if not jobs:
+            return
+
+        # Ensure subprocess can import our package via PYTHONPATH.
+        try:
+            lm_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))  # .../library_manager
+            pkg_parent = os.path.dirname(lm_dir)
+        except Exception:
+            pkg_parent = ""
+        env = dict(os.environ)
+        if pkg_parent:
+            prev = str(env.get("PYTHONPATH") or "")
+            env["PYTHONPATH"] = (pkg_parent + (os.pathsep + prev if prev else ""))
+
+        cmd = [_sys.executable, "-m", "library_manager.ui.symbols.meta_worker"]
+        inp = _json.dumps({"libs": jobs})
+        try:
+            # Heuristic timeout: allow roughly 1.5s per lib, up to 5 minutes.
+            if timeout_s is None:
+                timeout_s = min(300.0, max(15.0, 1.5 * float(len(jobs))))
+        except Exception:
+            timeout_s = 120.0
+
+        try:
+            cp = _subprocess.run(
+                cmd,
+                input=inp,
+                check=False,
+                stdout=_subprocess.PIPE,
+                stderr=_subprocess.STDOUT,
+                encoding="utf-8",
+                errors="replace",
+                env=env,
+                timeout=max(5.0, float(timeout_s or 120.0)),
+            )
+        except Exception:
+            return
+        if int(getattr(cp, "returncode", 1) or 1) != 0:
+            return
+        try:
+            resp = _json.loads((cp.stdout or "").strip() or "{}")
+        except Exception:
+            resp = {}
+        if not isinstance(resp, dict):
+            return
+        meta = resp.get("meta")
+        loaded = resp.get("loaded_libs")
+        if not isinstance(meta, dict) or not isinstance(loaded, list):
+            return
+
+        # Apply to cache state.
+        with self._lock:
+            st2 = self._state_by_repo.get(repo_path) or {}
+            mm = st2.get("sym_meta")
+            if not isinstance(mm, dict):
+                mm = {}
+                st2["sym_meta"] = mm
+            for k, v in meta.items():
+                try:
+                    if isinstance(v, (list, tuple)) and len(v) >= 2:
+                        mm[str(k)] = (str(v[0] or ""), str(v[1] or ""))
+                except Exception:
+                    continue
+            loaded_libs2 = st2.get("sym_meta_loaded_libs")
+            if not isinstance(loaded_libs2, set):
+                loaded_libs2 = set()
+                st2["sym_meta_loaded_libs"] = loaded_libs2
+            for lib in loaded:
+                try:
+                    if isinstance(lib, str) and lib.strip():
+                        loaded_libs2.add(lib.strip())
+                except Exception:
+                    continue
+            # Clear any in-flight markers for these libs.
+            try:
+                ev_map2 = st2.get("sym_meta_events")
+                if isinstance(ev_map2, dict):
+                    for lib in loaded:
+                        ev_map2.pop(lib, None)
+            except Exception:
+                pass
+            self._state_by_repo[repo_path] = st2
+
     def snapshot(self, repo_path: str) -> dict[str, Any]:
         repo_path = os.path.abspath(repo_path or "")
         with self._lock:
@@ -369,6 +535,90 @@ class SymbolLibraryCache:
                 "error": "",
             }
             return dict(st)
+
+    # -------- persisted description cache (for fast symbol browser open) --------
+
+    def _descr_cache_path(self, repo_path: str) -> str:
+        rp = os.path.abspath(str(repo_path or "").strip())
+        key = _hashlib.sha256(rp.encode("utf-8", errors="ignore")).hexdigest()[:24]
+        return os.path.join(plugin_cache_dir(), f"sym_descr_cache_{key}.json.gz")
+
+    def _descr_cache_fingerprint(self, repo_path: str) -> str:
+        """
+        Fingerprint based on the set of symbol library files + their mtimes/sizes.
+        Fast (stats only) and stable enough to invalidate when libraries change.
+        """
+        rp = os.path.abspath(str(repo_path or "").strip())
+        st = self.snapshot(rp)
+        sym_files = dict(st.get("sym_lib_files") or {})
+        rows: list[str] = []
+        for lib, p in sym_files.items():
+            nick = str(lib or "").strip()
+            ap = str(p or "").strip()
+            if not (nick and ap):
+                continue
+            try:
+                st2 = os.stat(ap)
+                rows.append(f"{nick}\t{ap}\t{int(st2.st_mtime)}\t{int(st2.st_size)}")
+            except Exception:
+                rows.append(f"{nick}\t{ap}\t?\t?")
+        rows.sort()
+        raw = ("\n".join(rows)).encode("utf-8", errors="ignore")
+        return _hashlib.sha256(raw).hexdigest()
+
+    def load_description_cache(self, repo_path: str) -> dict[str, str] | None:
+        """
+        Load cached base->description map if fingerprint matches current libraries.
+        """
+        rp = os.path.abspath(str(repo_path or "").strip())
+        p = self._descr_cache_path(rp)
+        if not os.path.isfile(p):
+            return None
+        try:
+            with _gzip.open(p, "rt", encoding="utf-8", errors="ignore") as f:
+                d = _json.loads(f.read() or "{}")
+        except Exception:
+            return None
+        if not isinstance(d, dict):
+            return None
+        want_fp = self._descr_cache_fingerprint(rp)
+        if str(d.get("fingerprint") or "") != str(want_fp or ""):
+            return None
+        mp = d.get("map")
+        if not isinstance(mp, dict):
+            return None
+        out: dict[str, str] = {}
+        for k, v in mp.items():
+            try:
+                kk = str(k or "").strip()
+                if not kk:
+                    continue
+                out[kk] = str(v or "")
+            except Exception:
+                continue
+        return out
+
+    def save_description_cache(self, repo_path: str, mp: dict[str, str]) -> None:
+        """
+        Save base->description map to a gzip JSON cache keyed by repo_path.
+        """
+        rp = os.path.abspath(str(repo_path or "").strip())
+        if not rp or not isinstance(mp, dict) or not mp:
+            return
+        fp = self._descr_cache_fingerprint(rp)
+        payload = {
+            "version": 1,
+            "repo_path": rp,
+            "fingerprint": fp,
+            "created_ts": float(_time.time()),
+            "map": dict(mp),
+        }
+        try:
+            with _gzip.open(self._descr_cache_path(rp), "wt", encoding="utf-8", newline="\n") as f:
+                f.write(_json.dumps(payload))
+                f.write("\n")
+        except Exception:
+            return
 
 
 SYMBOL_LIBCACHE = SymbolLibraryCache()

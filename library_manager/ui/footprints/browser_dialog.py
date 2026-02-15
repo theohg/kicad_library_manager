@@ -56,6 +56,8 @@ class _FootprintProvider:
 
     index = FP_LIBCACHE
     snapshot_key_items: str = "footprints"
+    show_index_line: bool = True
+    descr_prefetch_status_target: str = "index_line"
 
     create_button_label: str | None = "Create footprint..."
     on_create = staticmethod(_on_create_footprint)

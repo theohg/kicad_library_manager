@@ -22,6 +22,7 @@ from .git_ops import (
     format_age_minutes,
     fetch_stale_threshold_seconds,
     is_fetch_head_stale,
+    git_diff_name_status,
     git_status_entries,
     git_sync_ff_only,
     git_sync_status,
@@ -395,59 +396,62 @@ class BrowseDialog(wx.Dialog):
             self._on_reload()
 
     def _refresh_top_status(self) -> None:
+        # We show a category-level status here to match the main window's per-category icon,
+        # but also include library-level sync info as a suffix when relevant.
         try:
             st = git_sync_status(self._repo_path)
-            stale = bool(st.get("stale"))
-            dirty = bool(st.get("dirty"))
-            if stale:
-                age = st.get("age")
-                suffix = f" (last fetch {format_age_minutes(age)})" if age is not None else ""
-                self.status_icon.SetBitmap(self._bmp_gray)
-                self.status_lbl.SetLabel("Library status: unknown / stale — click Fetch remote" + suffix)
-            elif bool(st.get("up_to_date")):
-                self.status_icon.SetBitmap(self._bmp_green)
-                from ..config import Config
+        except Exception:
+            st = {"stale": True}
 
-                br = (Config.load_effective(self._repo_path).github_base_branch.strip() or "main")
-                self.status_lbl.SetLabel(f"Library status: synchronized with origin/{br}")
-            elif dirty:
-                self.status_icon.SetBitmap(self._bmp_yellow)
-                self.status_lbl.SetLabel("Library status: local changes (uncommitted)")
-            else:
-                behind = st.get("behind")
-                self.status_icon.SetBitmap(self._bmp_red)
-                if isinstance(behind, int):
-                    self.status_lbl.SetLabel(f"Library status: out of date (behind {behind})")
-                else:
-                    self.status_lbl.SetLabel("Library status: out of date")
-        except Exception as exc:  # noqa: BLE001
-            self.status_icon.SetBitmap(self._bmp_red)
-            self.status_lbl.SetLabel(f"Library status: unavailable ({exc})")
+        # --- category status (matches main window semantics) ---
+        try:
+            br = (Config.load_effective(self._repo_path).github_base_branch.strip() or "main")
+        except Exception:
+            br = "main"
+        status_ok = True
+        status_text = "up to date"
+        try:
+            changed = git_diff_name_status(self._repo_path, "HEAD", f"origin/{br}", [f"Database/{self._category.filename}"])
+            if changed:
+                status_ok = False
+                status_text = "out of date"
+        except Exception:
+            status_ok = False
+            status_text = "unknown"
 
-        # Pending overrides status color (legacy behavior: pending beats green/red).
+        bmp = self._bmp_green if status_ok else self._bmp_red
+        msg = f"Category status: {status_text}"
+
+        # Pending overrides green/red at the category level.
         try:
             has_pend, applied = pending_tag_for_category(self._category.display_name)
-            behind = None
-            try:
+        except Exception:
+            has_pend, applied = (False, False)
+        if has_pend:
+            bmp = self._bmp_blue if applied else self._bmp_yellow
+            if applied:
+                msg = "Category status: sync needed"
+            else:
+                msg = "Category status: pending changes"
+
+        # --- library status suffix (helpful context; does not control icon) ---
+        try:
+            if bool(st.get("stale")):
+                age = st.get("age")
+                suffix = f" (last fetch {format_age_minutes(age)})" if age is not None else ""
+                msg = msg + " — Library: stale/unknown" + suffix
+            elif bool(st.get("dirty")):
+                msg = msg + " — Library: local changes"
+            else:
                 behind = st.get("behind")
-            except Exception:
-                behind = None
+                if isinstance(behind, int) and behind > 0:
+                    msg = msg + f" — Library: sync needed (behind {behind})"
+        except Exception:
+            pass
 
-            if has_pend and applied and bool(st.get("up_to_date")) and isinstance(behind, int) and behind <= 0:
-                # If we're already synced (up_to_date), clear applied_remote items so we don't show "sync needed".
-                try:
-                    drop_applied_pending_if_already_synced(self._repo_path, category_name=self._category.display_name)
-                except Exception:
-                    pass
-                has_pend, applied = pending_tag_for_category(self._category.display_name)
-
-            if has_pend:
-                if applied and isinstance(behind, int) and behind > 0:
-                    self.status_icon.SetBitmap(self._bmp_blue)
-                    self.status_lbl.SetLabel("Library status: sync needed")
-                else:
-                    self.status_icon.SetBitmap(self._bmp_yellow)
-                    self.status_lbl.SetLabel("Library status: pending changes")
+        try:
+            self.status_icon.SetBitmap(bmp)
+            self.status_lbl.SetLabel(msg)
         except Exception:
             pass
 
@@ -455,6 +459,29 @@ class BrowseDialog(wx.Dialog):
             self.status_lbl.Wrap(max(200, self.GetClientSize().width - 80))
         except Exception:
             pass
+
+    def _notify_owner_refresh_best_effort(self) -> None:
+        """
+        Ask the main window to refresh category/pending indicators.
+        Used after submitting requests so the main window transitions to yellow immediately.
+        """
+        try:
+            owner = getattr(self, "_owner", None)
+        except Exception:
+            owner = None
+        if not owner:
+            return
+        for meth in (
+            "_refresh_sync_status",
+            "_reload_category_statuses",
+            "_refresh_remote_cat_updated_times_async",
+            "_refresh_categories_status_icon",
+        ):
+            try:
+                if hasattr(owner, meth):
+                    getattr(owner, meth)()  # type: ignore[misc]
+            except Exception:
+                pass
         try:
             self.Layout()
         except Exception:
@@ -1291,6 +1318,7 @@ class BrowseDialog(wx.Dialog):
 
         self._refresh_top_status()
         self._rebuild_list()
+        self._notify_owner_refresh_best_effort()
 
     def _on_edit(self, _evt: wx.CommandEvent) -> None:
         idx = self._selected_row_index()
@@ -1377,6 +1405,7 @@ class BrowseDialog(wx.Dialog):
 
         self._refresh_top_status()
         self._rebuild_list()
+        self._notify_owner_refresh_best_effort()
         # Avoid wx.LogMessage popups; status is reflected via pending icons.
 
     def _on_delete(self, _evt: wx.CommandEvent) -> None:
@@ -1442,6 +1471,7 @@ class BrowseDialog(wx.Dialog):
 
         self._refresh_top_status()
         self._rebuild_list()
+        self._notify_owner_refresh_best_effort()
 
     def _datasheet_value_for_row(self, row: dict[str, str]) -> str:
         """

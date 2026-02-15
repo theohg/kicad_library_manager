@@ -166,12 +166,26 @@ class AssetBrowserDialogBase(wx.Dialog):
         self._search_inflight = False
         self._search_debouncer = UiDebouncer(self, delay_ms=500, callback=lambda: self._on_search_timer(None))
 
+        # Preview: selection changes can fire rapidly while the user scrolls/clicks.
+        # Debounce to avoid kicking off expensive preview work on every intermediate row.
+        self._preview_debouncer = UiDebouncer(self, delay_ms=175, callback=lambda: self._on_preview_timer(None))
+        self._preview_pending_ref: str = ""
+
         # Asset status sets for icons
         self._asset_local: set[str] = set()
         self._asset_remote: set[str] = set()
         self._asset_remote_known = False
 
         self._updated_cache: dict[str, int] = {}
+        self._updated_inflight: set[str] = set()
+        # Cache fetch-stale threshold for UI hot paths (avoid git rev-parse on every click).
+        try:
+            self._fetch_stale_threshold_s = int(fetch_stale_threshold_seconds(self._repo_path))
+        except Exception:
+            self._fetch_stale_threshold_s = 5 * 60
+        # Cache FETCH_HEAD age for rapid-click scenarios (avoid repeated filesystem stats).
+        self._fetch_age_cache_ts: float = 0.0
+        self._fetch_age_cache_val: int | None = None
         self._col_dragging = False
         self._pending_descr_updates: dict[str, str] = {}
         self._closing = False
@@ -340,7 +354,7 @@ class AssetBrowserDialogBase(wx.Dialog):
         self.prev_status = self._preview.status
         self.prev_updated = self._preview.updated
         self.prev_bmp = self._preview.bmp
-        self.prev_choice.Bind(wx.EVT_CHOICE, lambda _e: (self._update_last_updated_label(), self._render_selected()))
+        self.prev_choice.Bind(wx.EVT_CHOICE, lambda _e: (self._update_last_updated_label(), self._schedule_render_selected()))
         prev_box.Add(self._preview, 1, wx.EXPAND)
         right_s = wx.BoxSizer(wx.VERTICAL)
         right_s.Add(prev_box, 1, wx.ALL | wx.EXPAND, 8)
@@ -419,17 +433,79 @@ class AssetBrowserDialogBase(wx.Dialog):
         self._start_index_watch_timer()
         self._refresh_asset_sets_async()
 
-        # Prefetch everything experiment (enabled by default; can be disabled via env var)
+        # Try loading a persisted description cache first (symbols), then prefetch remaining
+        # descriptions in background (if any). This avoids re-indexing on every open.
         try:
-            self._start_prefetch_all_descriptions_if_possible()
+            self._maybe_load_descr_cache_then_prefetch()
         except Exception:
-            pass
+            try:
+                self._start_prefetch_all_descriptions_if_possible()
+            except Exception:
+                pass
 
         # If provider wants it, show symbol index/meta progress here (not in the preview).
         try:
             self._start_index_line_updater_if_needed()
         except Exception:
             pass
+
+    def _maybe_load_descr_cache_then_prefetch(self) -> None:
+        if self._closing:
+            return
+        scope_key = str(getattr(self._p, "scope_key", "") or "").strip()
+        if scope_key not in ("symbols", "footprints"):
+            self._start_prefetch_all_descriptions_if_possible()
+            return
+
+        def work():
+            try:
+                if scope_key == "symbols":
+                    from ..symbols.libcache import SYMBOL_LIBCACHE  # type: ignore
+
+                    return SYMBOL_LIBCACHE.load_description_cache(self._repo_path)
+                if scope_key == "footprints":
+                    from ..footprints.libcache import FP_LIBCACHE  # type: ignore
+
+                    return FP_LIBCACHE.load_description_cache(self._repo_path)
+                return None
+            except Exception:
+                return None
+
+        def done(res, _err):
+            if self._closing:
+                return
+            mp = res if isinstance(res, dict) else None
+            if mp:
+                try:
+                    self._descr_cache.update({str(k): str(v or "") for k, v in mp.items() if str(k or "").strip()})
+                except Exception:
+                    pass
+                # Update visible item descriptions immediately.
+                try:
+                    kind = self._tree_kind()
+                    if kind in ("adv", "dv"):
+                        for b, it in list(self._base_to_item.items()):
+                            if b in self._descr_cache:
+                                try:
+                                    self.tree.SetItemText(it, 1, self._descr_cache.get(b, "") or "")
+                                except Exception:
+                                    pass
+                    elif kind == "gizmos":
+                        for b, it in list(self._base_to_item.items()):
+                            if b in self._descr_cache:
+                                try:
+                                    self.tree.SetItemText(it, self._descr_cache.get(b, "") or "", 1)
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
+            # Prefetch anything still missing (best-effort).
+            try:
+                self._start_prefetch_all_descriptions_if_possible()
+            except Exception:
+                pass
+
+        self._tasks.run(work, done)
 
     def _on_char_hook(self, evt: wx.KeyEvent) -> None:
         try:
@@ -472,10 +548,67 @@ class AssetBrowserDialogBase(wx.Dialog):
             line = getattr(self, "_index_line", None)
             if not line:
                 return
+            # If the description prefetch is actively using the index line for status,
+            # avoid overwriting it.
+            try:
+                if bool(getattr(self, "_descr_prefetch_all_started", False)) and not bool(getattr(self, "_descr_prefetch_all_done", False)):
+                    return
+            except Exception:
+                pass
             try:
                 snap = self._index_snapshot() or {}
             except Exception:
                 snap = {}
+
+            scope_key = str(getattr(self._p, "scope_key", "") or "").strip()
+            if scope_key == "footprints":
+                loading = bool(snap.get("loading"))
+                loaded = bool(snap.get("loaded"))
+                err = str(snap.get("error") or "").strip()
+                if err:
+                    try:
+                        line.SetLabel(f"Footprint index failed: {err}")
+                    except Exception:
+                        pass
+                    return
+                if loading and not loaded:
+                    try:
+                        line.SetLabel("Indexing footprints…")
+                    except Exception:
+                        pass
+                    return
+                fps = snap.get("footprints")
+                if not isinstance(fps, list):
+                    fps = []
+                fp_dirs = dict(snap.get("fp_lib_dirs") or {})
+                total_global = len([k for k in fp_dirs.keys() if str(k or "").strip()])
+                # Best-effort local pretty dir count.
+                local_cnt = 0
+                try:
+                    cached = getattr(self, "_fp_local_pretty_count", None)
+                    if isinstance(cached, int):
+                        local_cnt = cached
+                    else:
+                        root = os.path.join(self._repo_path, "Footprints")
+                        if os.path.isdir(root):
+                            local_cnt = len([n for n in os.listdir(root) if str(n).lower().endswith(".pretty") and os.path.isdir(os.path.join(root, n))])
+                        setattr(self, "_fp_local_pretty_count", int(local_cnt))
+                except Exception:
+                    local_cnt = 0
+                total_libs = int(local_cnt) + int(total_global)
+                try:
+                    line.SetLabel(f"Footprints indexed: {len(fps):,} ({total_libs} libs: {local_cnt} local, {total_global} global)")
+                except Exception:
+                    pass
+                # For footprints, we only need a one-time summary; description indexing uses the same line.
+                try:
+                    rep = getattr(self, "_index_line_repeater", None)
+                    if rep:
+                        rep.stop()
+                    self._index_line_repeater = None
+                except Exception:
+                    pass
+                return
 
             loading = bool(snap.get("loading"))
             loaded = bool(snap.get("loaded"))
@@ -525,27 +658,49 @@ class AssetBrowserDialogBase(wx.Dialog):
                     local_libs.add(nick)
             total_local = len(local_libs)
             total_global = max(0, total_libs - total_local)
-            meta_loaded_libs = set([str(x or "").strip() for x in loaded_libs]) & lib_keys
-            local_meta_loaded = len(meta_loaded_libs & local_libs)
-            global_meta_loaded = max(0, len(meta_loaded_libs) - local_meta_loaded)
-
             total_symbols = len(sym_refs)
-            meta_symbols = len(sym_meta)
+            # The browser uses `_descr_cache` (persisted + prefetch-all) for the "Description" column.
+            # Using `sym_meta` here is misleading when meta is loaded lazily or via fallback paths.
+            try:
+                bases_all = set(getattr(self, "_bases_all", []) or [])
+            except Exception:
+                bases_all = set()
+            try:
+                descr_nonempty = len([k for k, v in (getattr(self, "_descr_cache", {}) or {}).items() if k in bases_all and str(v or "").strip()])
+            except Exception:
+                descr_nonempty = 0
+            # Coverage by library nickname (helps distinguish "loaded for this lib" vs global indexing state).
+            descr_loaded_libs: set[str] = set()
+            try:
+                dc = dict(getattr(self, "_descr_cache", {}) or {})
+                for k, v in dc.items():
+                    if not (k and ":" in str(k)):
+                        continue
+                    if k not in bases_all:
+                        continue
+                    if not str(v or "").strip():
+                        continue
+                    descr_loaded_libs.add(str(k).split(":", 1)[0].strip())
+            except Exception:
+                descr_loaded_libs = set()
+            descr_loaded_libs &= lib_keys
+            local_descr_loaded = len(descr_loaded_libs & local_libs)
+            global_descr_loaded = max(0, len(descr_loaded_libs) - local_descr_loaded)
             try:
                 sym_part = f"Symbols indexed: {total_symbols:,} ({total_libs} libs: {total_local} local, {total_global} global)"
-                meta_part = f"Descriptions loaded: {meta_symbols:,}/{total_symbols:,}"
+                meta_part = f"Descriptions loaded: {descr_nonempty:,}/{total_symbols:,}"
                 lib_part = ""
                 if total_libs > 0:
                     lib_part = (
-                        f" (meta libs: {len(meta_loaded_libs)}/{total_libs}"
-                        f"; local {local_meta_loaded}/{total_local}, global {global_meta_loaded}/{total_global})"
+                        f" (descr libs: {len(descr_loaded_libs)}/{total_libs}"
+                        f"; local {local_descr_loaded}/{total_local}, global {global_descr_loaded}/{total_global})"
                     )
                 line.SetLabel(f"{sym_part} — {meta_part}{lib_part}")
             except Exception:
                 pass
 
-            # Stop once meta for all libs is loaded (and index isn't loading).
-            if total_libs > 0 and len(meta_loaded_libs) < total_libs:
+            # Stop once descriptions have coverage for all libs (and index isn't loading).
+            if total_libs > 0 and len(descr_loaded_libs) < total_libs:
                 return
             try:
                 rep = getattr(self, "_index_line_repeater", None)
@@ -555,7 +710,8 @@ class AssetBrowserDialogBase(wx.Dialog):
             except Exception:
                 pass
 
-        self._index_line_repeater = UiRepeater(self, interval_ms=500, callback=tick)
+        # This is purely informational; update slower to avoid periodic UI hitches on some platforms.
+        self._index_line_repeater = UiRepeater(self, interval_ms=1500, callback=tick)
 
     def _stop_timers_best_effort(self) -> None:
         """
@@ -572,10 +728,51 @@ class AssetBrowserDialogBase(wx.Dialog):
         except Exception:
             pass
         try:
+            if getattr(self, "_preview_debouncer", None):
+                self._preview_debouncer.cancel()
+        except Exception:
+            pass
+        try:
             if getattr(self, "_libcache_repeater", None):
                 self._libcache_repeater.stop()
         except Exception:
             pass
+
+    def _schedule_render_selected(self) -> None:
+        """
+        Debounced render for the currently selected ref (prevents small UI hitches when rapidly clicking/scrolling).
+        """
+        try:
+            ref = (self.prev_choice.GetStringSelection() or "").strip()
+        except Exception:
+            ref = ""
+        if not ref:
+            return
+        self._preview_pending_ref = ref
+        try:
+            if getattr(self, "_preview_debouncer", None):
+                self._preview_debouncer.trigger(delay_ms=175)
+        except Exception:
+            # Fallback: render immediately.
+            self._render_selected()
+
+    def _on_preview_timer(self, _evt=None) -> None:
+        if self._closing:
+            return
+        try:
+            ref = str(getattr(self, "_preview_pending_ref", "") or "").strip()
+        except Exception:
+            ref = ""
+        if not ref:
+            return
+        # Ensure dropdown selection still matches (user may have moved since scheduling).
+        try:
+            cur = (self.prev_choice.GetStringSelection() or "").strip()
+        except Exception:
+            cur = ""
+        if cur != ref:
+            return
+        self._render_selected()
 
     def Destroy(self) -> bool:  # type: ignore[override]
         # Ensure timers are stopped before wx schedules C++ deletion.
@@ -1531,10 +1728,21 @@ class AssetBrowserDialogBase(wx.Dialog):
         self._delete_children_best_effort(item)
         self._base_to_item = {}
         max_children = 600 if q else 4000
-        for b in bases[:max_children]:
-            it2 = self._append_child(item, b, descr=self._descr_cache.get(b, ""))
-            if it2:
-                self._base_to_item[b] = it2
+        # Large inserts can be slow on some wx ports; freeze to avoid repaint per row.
+        try:
+            self.tree.Freeze()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        try:
+            for b in bases[:max_children]:
+                it2 = self._append_child(item, b, descr=self._descr_cache.get(b, ""))
+                if it2:
+                    self._base_to_item[b] = it2
+        finally:
+            try:
+                self.tree.Thaw()  # type: ignore[attr-defined]
+            except Exception:
+                pass
         self._lib_populated.add(lib)
         self._start_load_descriptions(bases[:max_children])
 
@@ -1553,7 +1761,14 @@ class AssetBrowserDialogBase(wx.Dialog):
         return base
 
     def _start_load_descriptions(self, bases: list[str]) -> None:
-        bases = [b for b in bases if b and b not in self._descr_cache]
+        # Treat empty cached strings as "not loaded yet" (important for footprints:
+        # a subprocess batch may skip items it can't resolve, which would otherwise
+        # poison the cache with "" and prevent later lazy loads on expand).
+        scope_key = str(getattr(self._p, "scope_key", "") or "").strip()
+        if scope_key == "footprints":
+            bases = [b for b in bases if b and (b not in self._descr_cache or not str(self._descr_cache.get(b) or "").strip())]
+        else:
+            bases = [b for b in bases if b and b not in self._descr_cache]
         if not bases:
             return
         if len(bases) > 1200:
@@ -1579,25 +1794,29 @@ class AssetBrowserDialogBase(wx.Dialog):
                 self._descr_cache[b] = d
             kind = self._tree_kind()
             if kind in ("adv", "dv"):
-                for b, it in list(self._base_to_item.items()):
-                    if b in mp:
-                        if self._col_dragging:
-                            self._pending_descr_updates[b] = mp[b] or ""
-                            continue
-                        try:
-                            self.tree.SetItemText(it, 1, mp[b] or "")
-                        except Exception:
-                            pass
+                for b, d in mp.items():
+                    it = self._base_to_item.get(b)
+                    if not it:
+                        continue
+                    if self._col_dragging:
+                        self._pending_descr_updates[b] = d or ""
+                        continue
+                    try:
+                        self.tree.SetItemText(it, 1, d or "")
+                    except Exception:
+                        pass
             elif kind == "gizmos":
-                for b, it in list(self._base_to_item.items()):
-                    if b in mp:
-                        if self._col_dragging:
-                            self._pending_descr_updates[b] = mp[b] or ""
-                            continue
-                        try:
-                            self.tree.SetItemText(it, mp[b] or "", 1)
-                        except Exception:
-                            pass
+                for b, d in mp.items():
+                    it = self._base_to_item.get(b)
+                    if not it:
+                        continue
+                    if self._col_dragging:
+                        self._pending_descr_updates[b] = d or ""
+                        continue
+                    try:
+                        self.tree.SetItemText(it, d or "", 1)
+                    except Exception:
+                        pass
 
         self._tasks.run(work, done)
 
@@ -1660,15 +1879,28 @@ class AssetBrowserDialogBase(wx.Dialog):
         for vref in variants:
             self.prev_choice.Append(vref)
         self.prev_choice.Enable(True)
-        self.prev_choice.SetSelection(0)
+        # Avoid firing EVT_CHOICE / extra UI work when we update programmatically.
+        try:
+            if hasattr(self.prev_choice, "ChangeSelection"):
+                self.prev_choice.ChangeSelection(0)  # type: ignore[attr-defined]
+            else:
+                self.prev_choice.SetSelection(0)
+        except Exception:
+            try:
+                self.prev_choice.SetSelection(0)
+            except Exception:
+                pass
         # Hide the variants dropdown if there is only one.
         try:
-            self.prev_choice.Show(len(variants) > 1)
-            self.Layout()
+            want = len(variants) > 1
+            cur = bool(self.prev_choice.IsShown())
+            if want != cur:
+                self.prev_choice.Show(bool(want))
+                self.Layout()
         except Exception:
             pass
         self._update_last_updated_label()
-        self._render_selected()
+        self._schedule_render_selected()
         if self._picker_mode and getattr(self, "pick_btn", None):
             try:
                 self.pick_btn.Enable(bool(self._current_pick_ref()))  # type: ignore[union-attr]
@@ -1684,9 +1916,32 @@ class AssetBrowserDialogBase(wx.Dialog):
             self.prev_updated.SetLabel("")
             return
 
-        age = git_fetch_head_age_seconds(self._repo_path)
-        stale = is_fetch_head_stale(self._repo_path, age)
-        if stale:
+        # Cache for a short window; this label is updated on every row click.
+        try:
+            now = time.time()
+        except Exception:
+            now = 0.0
+        age = None
+        try:
+            if now and (now - float(getattr(self, "_fetch_age_cache_ts", 0.0) or 0.0)) < 1.0:
+                age = getattr(self, "_fetch_age_cache_val", None)
+        except Exception:
+            age = None
+        if age is None:
+            age = git_fetch_head_age_seconds(self._repo_path)
+            try:
+                self._fetch_age_cache_ts = float(now or time.time())
+                self._fetch_age_cache_val = age
+            except Exception:
+                pass
+        # IMPORTANT: this method runs on every row click, so it must be cheap.
+        # Do NOT call `is_fetch_head_stale()` here: it may run `git rev-parse` which hitches the UI.
+        try:
+            threshold_s = int(getattr(self, "_fetch_stale_threshold_s", 5 * 60) or (5 * 60))
+        except Exception:
+            threshold_s = 5 * 60
+        stale_quick = (age is None) or (int(age) > int(threshold_s))
+        if stale_quick:
             suffix = f" (last fetch {format_age_minutes(age)})" if age is not None else ""
             self.prev_updated.SetLabel("Last updated (remote): unknown / stale — fetch remote" + suffix)
             return
@@ -1703,8 +1958,16 @@ class AssetBrowserDialogBase(wx.Dialog):
 
                 self.prev_updated.SetLabel(f"Last updated (remote): {_dt.datetime.fromtimestamp(int(ts)).strftime('%Y-%m-%d %H:%M')}")
             return
+        if rel in self._updated_inflight:
+            # Avoid queueing a new `git log` for each click while one is already running.
+            self.prev_updated.SetLabel("Last updated (remote): loading…")
+            return
 
         self.prev_updated.SetLabel("Last updated (remote): loading…")
+        try:
+            self._updated_inflight.add(rel)
+        except Exception:
+            pass
 
         def work():
             return git_last_updated_epoch(self._repo_path, rel, ref=None)
@@ -1712,6 +1975,10 @@ class AssetBrowserDialogBase(wx.Dialog):
         def done(ts, err):
             if self._closing:
                 return
+            try:
+                self._updated_inflight.discard(rel)
+            except Exception:
+                pass
             if err or not ts:
                 self.prev_updated.SetLabel("Last updated (remote): unavailable")
                 return
@@ -1987,32 +2254,97 @@ class AssetBrowserDialogBase(wx.Dialog):
                     if self._closing or self._descr_prefetch_all_cancel:
                         return
                     for k, v in mp.items():
-                        if k not in self._descr_cache:
+                        # If we previously cached an empty string, allow a later non-empty value to replace it.
+                        if k not in self._descr_cache or not str(self._descr_cache.get(k) or "").strip():
                             self._descr_cache[k] = v
                     ui_set_status(f"Indexing descriptions ({done_n}/{total})…")
 
                 wx.CallAfter(apply_on_ui)
 
-            for b in todo:
-                if self._closing or self._descr_prefetch_all_cancel:
-                    break
+            # Footprints: use subprocess extraction in batches to avoid starving the UI process.
+            scope_key = str(getattr(self._p, "scope_key", "") or "").strip()
+            if scope_key == "footprints":
                 try:
-                    rr = self._repr_ref_for_base(b)
-                    d = self._p.extract_description_for_ref(self._repo_path, rr) or ""
+                    from ..footprints.libcache import FP_LIBCACHE  # type: ignore
                 except Exception:
-                    d = ""
-                dd = (d or "").replace("\n", " ").strip()
-                if len(dd) > 180:
-                    dd = dd[:177] + "…"
-                chunk[b] = dd
-                done_n += 1
-                if dd:
-                    nonempty_n += 1
+                    FP_LIBCACHE = None  # type: ignore
 
-                now = time.monotonic()
-                if len(chunk) >= 200 or (now - last_flush) >= 0.8:
-                    last_flush = now
-                    flush()
+                # Map base -> representative ref (real footprint) for extraction.
+                base_to_rr: dict[str, str] = {}
+                rr_to_bases: dict[str, list[str]] = {}
+                for b in todo:
+                    try:
+                        rr = self._repr_ref_for_base(b)
+                    except Exception:
+                        rr = b
+                    base_to_rr[b] = rr
+                    rr_to_bases.setdefault(rr, []).append(b)
+
+                rrs = [r for r in rr_to_bases.keys() if r]
+                batch_size = 400
+                i = 0
+                while i < len(rrs):
+                    if self._closing or self._descr_prefetch_all_cancel:
+                        break
+                    batch = rrs[i : i + batch_size]
+                    i += batch_size
+                    mp: dict[str, str] = {}
+                    try:
+                        if FP_LIBCACHE:
+                            mp = FP_LIBCACHE.extract_descriptions_subprocess(self._repo_path, batch) or {}
+                    except Exception:
+                        mp = {}
+                    for rr in batch:
+                        # If the subprocess couldn't resolve this ref to a file path, it will be absent from `mp`.
+                        # Do NOT cache empty strings for those (it would prevent later retries).
+                        if rr not in mp:
+                            continue
+                        dd = (mp.get(rr) or "").replace("\n", " ").strip()
+                        if len(dd) > 180:
+                            dd = dd[:177] + "…"
+                        for b in rr_to_bases.get(rr, []):
+                            chunk[b] = dd
+                        done_n += len(rr_to_bases.get(rr, []))
+                        if dd:
+                            nonempty_n += len(rr_to_bases.get(rr, []))
+
+                    now = time.monotonic()
+                    if len(chunk) >= 200 or (now - last_flush) >= 0.8:
+                        last_flush = now
+                        flush()
+                    try:
+                        time.sleep(0.005)
+                    except Exception:
+                        pass
+            else:
+                for b in todo:
+                    if self._closing or self._descr_prefetch_all_cancel:
+                        break
+                    try:
+                        rr = self._repr_ref_for_base(b)
+                        d = self._p.extract_description_for_ref(self._repo_path, rr) or ""
+                    except Exception:
+                        d = ""
+                    dd = (d or "").replace("\n", " ").strip()
+                    if len(dd) > 180:
+                        dd = dd[:177] + "…"
+                    chunk[b] = dd
+                    done_n += 1
+                    if dd:
+                        nonempty_n += 1
+
+                    # Yield periodically so this CPU-heavy loop can't starve the wx UI thread
+                    # (important on large symbol libs).
+                    if done_n % 80 == 0:
+                        try:
+                            time.sleep(0.005)
+                        except Exception:
+                            pass
+
+                    now = time.monotonic()
+                    if len(chunk) >= 200 or (now - last_flush) >= 0.8:
+                        last_flush = now
+                        flush()
 
             flush()
 
@@ -2026,6 +2358,19 @@ class AssetBrowserDialogBase(wx.Dialog):
                 _dbg(f"{self._p.kind_label}: descr_prefetch_all_done done={done_n}/{total} nonempty={nonempty_n} descr_cache={len(self._descr_cache)}")
                 try:
                     self.prev_status.SetLabel(f"Descriptions indexed ({nonempty_n}/{total})")
+                except Exception:
+                    pass
+                # Persist description cache for faster next open (best-effort).
+                try:
+                    scope_key = str(getattr(self._p, "scope_key", "") or "").strip()
+                    if scope_key == "symbols":
+                        from ..symbols.libcache import SYMBOL_LIBCACHE  # type: ignore
+
+                        SYMBOL_LIBCACHE.save_description_cache(self._repo_path, dict(self._descr_cache))
+                    elif scope_key == "footprints":
+                        from ..footprints.libcache import FP_LIBCACHE  # type: ignore
+
+                        FP_LIBCACHE.save_description_cache(self._repo_path, dict(self._descr_cache))
                 except Exception:
                     pass
                 try:

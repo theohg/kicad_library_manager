@@ -239,15 +239,46 @@ class MainDialog(wx.Frame):
         # History panel state
         self._hist_rows: list[dict[str, str]] = []
         self._hist_for_path: str | None = None
+        self._hist_inflight_for_path: str | None = None
+        self._hist_last_loaded_for_path: str | None = None
+        self._hist_last_loaded_ts: float = 0.0
+        self._hist_force_refresh: bool = False
         self._set_history_rows([])
         # Debounce history loads so scrolling the category list stays responsive.
         self._hist_debouncer = UiDebouncer(self, delay_ms=250, callback=self._refresh_selected_category_history_async)
 
-    def _schedule_history_refresh(self) -> None:
+    def _schedule_history_refresh(self, force: bool = False) -> None:
         """
         Debounced refresh of the History panel for the currently selected category.
         Prevents running `git log` on every intermediate selection while the user scrolls.
         """
+        cat = self._selected_category()
+        if not cat:
+            return
+        rel_path = f"Database/{cat.filename}"
+        try:
+            now = float(time.time())
+        except Exception:
+            now = 0.0
+        if not force:
+            # If a job is already running for this same path, don't restart it (prevents flicker).
+            if getattr(self, "_hist_inflight_for_path", None) == rel_path:
+                return
+            # If we just loaded this path, avoid immediate re-loads triggered by periodic UI refreshes.
+            try:
+                if (
+                    getattr(self, "_hist_last_loaded_for_path", None) == rel_path
+                    and bool(getattr(self, "_hist_rows", []) or [])
+                    and now
+                    and (now - float(getattr(self, "_hist_last_loaded_ts", 0.0) or 0.0)) < 2.0
+                ):
+                    return
+            except Exception:
+                pass
+        try:
+            self._hist_force_refresh = bool(force)
+        except Exception:
+            self._hist_force_refresh = False
         try:
             if getattr(self, "_hist_debouncer", None):
                 self._hist_debouncer.trigger(delay_ms=250)
@@ -520,32 +551,13 @@ class MainDialog(wx.Frame):
                                 global_after.append(nick)
                         local_libs = sorted(set(local_first))
                         global_libs = sorted(set([x for x in global_after if x not in set(local_first)]))
-                        # IMPORTANT: even in a background thread, heavy Python parsing can
-                        # momentarily starve the wx UI thread due to the GIL. Throttle the
-                        # work so the main window stays smooth.
                         import time as _time
-                        batch = 0
 
-                        # Phase 1: prefetch repo-local libs quickly (these are usually small
-                        # and most relevant to the current database).
-                        for lib in local_libs:
-                            if not is_window_alive(self):
-                                return
-                            try:
-                                SYMBOL_LIBCACHE.ensure_meta_loaded(rp, lib, wait_s=0.0)
-                            except Exception:
-                                continue
-                            # Short yield between libs; longer yield every few libs.
-                            batch += 1
-                            try:
-                                _time.sleep(0.01)
-                            except Exception:
-                                pass
-                            if batch % 8 == 0:
-                                try:
-                                    _time.sleep(0.08)
-                                except Exception:
-                                    pass
+                        # Phase 1: prefetch repo-local libs via subprocess (keeps UI responsive).
+                        try:
+                            SYMBOL_LIBCACHE.prefetch_meta_subprocess(rp, local_libs)
+                        except Exception:
+                            pass
 
                         # Phase 2: prefetch global/project libs later (can be large).
                         if global_libs:
@@ -553,23 +565,10 @@ class MainDialog(wx.Frame):
                                 _time.sleep(3.0)
                             except Exception:
                                 pass
-                        for lib in global_libs:
-                            if not is_window_alive(self):
-                                return
-                            try:
-                                SYMBOL_LIBCACHE.ensure_meta_loaded(rp, lib, wait_s=0.0)
-                            except Exception:
-                                continue
-                            batch += 1
-                            try:
-                                _time.sleep(0.01)
-                            except Exception:
-                                pass
-                            if batch % 6 == 0:
-                                try:
-                                    _time.sleep(0.12)
-                                except Exception:
-                                    pass
+                        try:
+                            SYMBOL_LIBCACHE.prefetch_meta_subprocess(rp, global_libs)
+                        except Exception:
+                            pass
                     except Exception:
                         return
 
@@ -877,7 +876,10 @@ class MainDialog(wx.Frame):
                             self.Layout()
                             return
                     self.sync_icon.SetBitmap(self._bmp_blue)
-                    self.sync_label.SetLabel("Library status: sync needed")
+                    if behind > 0:
+                        self.sync_label.SetLabel(f"Library status: sync needed (behind {behind})")
+                    else:
+                        self.sync_label.SetLabel("Library status: sync needed")
                 elif dirty or any_pending:
                     self.sync_icon.SetBitmap(self._bmp_yellow)
                     self.sync_label.SetLabel("Library status: pending changes")
@@ -1845,8 +1847,8 @@ class MainDialog(wx.Frame):
                     has_cat_req = any(str(p.get("action") or "") in {"category_add", "category_delete"} for p in (pend_items or []))
                 except Exception:
                     has_cat_req = False
-                tag = "sync needed" if applied else "pending"
-                rows[-1]["status"] = tag if has_cat_req else f"{status_text} ({tag})"
+                tag = "sync needed" if applied else "pending changes"
+                rows[-1]["status"] = tag if (has_cat_req or not applied) else f"{status_text} ({tag})"
 
         # Pending category adds/deletes that are not yet present locally (show placeholders like ui.py).
         try:
@@ -1862,7 +1864,7 @@ class MainDialog(wx.Frame):
                 applied = any(str(p.get("state") or "") == "applied_remote" for p in items)
                 img = self.cat_img_blue if applied else self.cat_img_yellow
                 # Keep wording consistent with existing categories: pending -> sync needed.
-                status_txt = "sync needed" if applied else "pending"
+                status_txt = "sync needed" if applied else "pending changes"
                 # Create a placeholder Category-like object.
                 fn = f"db-{name}.csv"
                 try:
@@ -1954,7 +1956,25 @@ class MainDialog(wx.Frame):
 
         self._cat_row_items = row_items
         self.cat_list.Thaw()
-        self._schedule_history_refresh()
+        # Avoid flickering the History panel "(loading)" while staying on the same category.
+        # Only refresh history if the selection now points to a different path than the history currently shown,
+        # or if history is empty (first load).
+        try:
+            cur = self._selected_category()
+        except Exception:
+            cur = None
+        if cur:
+            rel_path = f"Database/{cur.filename}"
+            try:
+                shown = str(getattr(self, "_hist_for_path", "") or "")
+            except Exception:
+                shown = ""
+            try:
+                has_rows = bool(getattr(self, "_hist_rows", []) or [])
+            except Exception:
+                has_rows = False
+            if (not has_rows) or (rel_path != shown):
+                self._schedule_history_refresh(force=True)
 
     def _selected_category(self) -> Category | None:
         try:
@@ -1979,8 +1999,29 @@ class MainDialog(wx.Frame):
             self._set_history_rows([])
             return
         rel_path = f"Database/{cat.filename}"
+        # If a history load is already in-flight for this same category, do not restart it.
+        if getattr(self, "_hist_inflight_for_path", None) == rel_path:
+            return
+        same_as_shown = (getattr(self, "_hist_for_path", None) == rel_path)
         self._hist_for_path = rel_path
-        self._hist_title.SetLabel(f"History: {category_title(cat)} (loading)")
+        # Avoid label flicker when we're refreshing the same category: keep current title until results arrive.
+        try:
+            if not (same_as_shown and bool(getattr(self, "_hist_rows", []) or [])):
+                self._hist_title.SetLabel(f"History: {category_title(cat)} (loading)")
+        except Exception:
+            pass
+        try:
+            self._hist_inflight_for_path = rel_path
+        except Exception:
+            self._hist_inflight_for_path = rel_path
+        try:
+            force = bool(getattr(self, "_hist_force_refresh", False))
+        except Exception:
+            force = False
+        try:
+            self._hist_force_refresh = False
+        except Exception:
+            pass
 
         try:
             br = (self._cfg.github_base_branch or "main").strip() or "main"
@@ -2000,6 +2041,11 @@ class MainDialog(wx.Frame):
         def done(res: list[dict[str, str]] | None, err: Exception | None) -> None:
             if not is_window_alive(self):
                 return
+            try:
+                if getattr(self, "_hist_inflight_for_path", None) == rel_path:
+                    self._hist_inflight_for_path = None
+            except Exception:
+                pass
             # Drop stale history results if selection has changed since this job started.
             if self._hist_for_path != rel_path:
                 return
@@ -2012,6 +2058,11 @@ class MainDialog(wx.Frame):
             except Exception:
                 pass
             self._set_history_rows(list(res or []))
+            try:
+                self._hist_last_loaded_for_path = rel_path
+                self._hist_last_loaded_ts = float(time.time())
+            except Exception:
+                pass
 
         # Cancel any in-flight history load and start a new one.
         try:
