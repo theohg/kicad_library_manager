@@ -587,6 +587,53 @@ def element_from_fields(*, kind: str, density: str, name: str, fields: Dict[str,
     for path, val in (fields or {}).items():
         _set_nested(housing, path, val)
 
+    def _ensure_range_dict(key: str, *, default_nom: float = 0.0) -> None:
+        """
+        Normalize housing[key] into a {min, nom, max} dict when possible.
+
+        Some older saved states / external callers may provide a plain float for fields that
+        quad-family generators expect to be dicts (e.g. rowSpan/columnSpan for QFP/CQFP).
+        """
+        try:
+            v = housing.get(key)
+        except Exception:
+            v = None
+        if isinstance(v, dict):
+            # Ensure required keys exist.
+            try:
+                if "nom" not in v:
+                    v["nom"] = v.get("max", v.get("min", default_nom))
+                if "min" not in v:
+                    v["min"] = v.get("nom", default_nom)
+                if "max" not in v:
+                    v["max"] = v.get("nom", default_nom)
+            except Exception:
+                pass
+            return
+        if isinstance(v, (int, float)):
+            fv = float(v)
+            housing[key] = {"min": fv, "nom": fv, "max": fv}
+            return
+
+    def _ensure_max_dict(key: str, *, default_max: float = 0.0) -> None:
+        """
+        Normalize housing[key] into a {max} dict when possible (used by many builders).
+        """
+        try:
+            v = housing.get(key)
+        except Exception:
+            v = None
+        if isinstance(v, dict):
+            try:
+                if "max" not in v:
+                    v["max"] = v.get("nom", v.get("min", default_max))
+            except Exception:
+                pass
+            return
+        if isinstance(v, (int, float)):
+            housing[key] = {"max": float(v)}
+            return
+
     # Oscillator special mapping: variant -> boolean flags
     if kind == "oscillator":
         variant = str(fields.get("variant", "corner-concave")).strip().lower()
@@ -646,6 +693,15 @@ def element_from_fields(*, kind: str, density: str, name: str, fields: Dict[str,
     if kind == "chip":
         comp_type = housing.get("componentType", "CAPC")
         housing["polarized"] = comp_type in ("LEDC", "DIOC")
+
+    # Normalize quad-family range fields that generators expect as dicts.
+    # (Defensive: prevents crashes if persisted state or external callers provide floats.)
+    if kind in ("qfp", "cqfp"):
+        _ensure_range_dict("rowSpan", default_nom=0.0)
+        _ensure_range_dict("columnSpan", default_nom=0.0)
+        _ensure_max_dict("height", default_max=0.0)
+        _ensure_range_dict("leadLength", default_nom=0.0)
+        _ensure_range_dict("leadWidth", default_nom=0.0)
 
     element = {
         "name": (name or "").strip(),

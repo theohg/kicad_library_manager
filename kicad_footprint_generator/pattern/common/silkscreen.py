@@ -1,3 +1,25 @@
+import os
+
+
+def _dbg(msg: str) -> None:
+    """
+    Debug logging for footprint generator silkscreen routines.
+
+    IMPORTANT: printing thousands of lines can make KiCad's UI appear hung (stdout can block).
+    Enable explicitly via:
+      KICAD_FOOTPRINT_GENERATOR_DEBUG=1
+    """
+    try:
+        v = str(os.environ.get("KICAD_FOOTPRINT_GENERATOR_DEBUG", "") or "").strip().lower()
+    except Exception:
+        v = ""
+    if v in ("1", "true", "yes", "on"):
+        try:
+            print(msg)
+        except Exception:
+            pass
+
+
 def preamble(pattern, housing):
     line_width = pattern.settings['lineWidth']['silkscreen']
     
@@ -314,11 +336,11 @@ def quad(pattern, housing):
     body_width = housing['bodyWidth']['nom']
     body_length = housing['bodyLength']['nom']
     
-    # Debug: Identify package type
+    # Debug: Identify package type (guarded; see _dbg()).
     package_type = "QFP" if housing.get('qfp') else ("QFN" if housing.get('qfn') else "CQFP")
-    print(f"\nDEBUG QUAD SILKSCREEN: Package type = {package_type}")
-    print(f"DEBUG: Body dimensions = {body_width:.3f} x {body_length:.3f}")
-    print(f"DEBUG: Pad count = {len(list(pattern.pads.values()))}")
+    _dbg(f"DEBUG QUAD SILKSCREEN: Package type = {package_type}")
+    _dbg(f"DEBUG: Body dimensions = {body_width:.3f} x {body_length:.3f}")
+    _dbg(f"DEBUG: Pad count = {len(list(pattern.pads.values()))}")
     
     # Get all pads to find clearance boundaries
     pads = list(pattern.pads.values())
@@ -362,8 +384,8 @@ def quad(pattern, housing):
     max_corner_length_x = float('inf')
     max_corner_length_y = float('inf')
     
-    print(f"\nDEBUG: Body position: body_x=±{body_x:.3f}, body_y=±{body_y:.3f}")
-    print(f"DEBUG: Required clearance: {silk_pad_clearance:.3f}, line width: {silk_line_width:.3f}")
+    _dbg(f"DEBUG: Body position: body_x=±{body_x:.3f}, body_y=±{body_y:.3f}")
+    _dbg(f"DEBUG: Required clearance: {silk_pad_clearance:.3f}, line width: {silk_line_width:.3f}")
     
     # Better logic for QFN: identify pads by position patterns
     # Group pads by their approximate positions to find edge pads
@@ -378,20 +400,20 @@ def quad(pattern, housing):
     max_x = max(pad.x for pad in pads)
     min_x = min(pad.x for pad in pads)
     
-    print(f"DEBUG: Pad position ranges: Y from {min_y:.3f} to {max_y:.3f}, X from {min_x:.3f} to {max_x:.3f}")
+    _dbg(f"DEBUG: Pad position ranges: Y from {min_y:.3f} to {max_y:.3f}, X from {min_x:.3f} to {max_x:.3f}")
     
     # Tolerance for grouping pads (within 0.1mm of edge)
     tolerance = 0.1
     
     for i, pad in enumerate(pads):
-        print(f"DEBUG: Analyzing pad {i}: pos=({pad.x:.3f}, {pad.y:.3f}), size={pad.width:.3f}x{pad.height:.3f}")
+        _dbg(f"DEBUG: Analyzing pad {i}: pos=({pad.x:.3f}, {pad.y:.3f}), size={pad.width:.3f}x{pad.height:.3f}")
         
         is_top = abs(pad.y - max_y) < tolerance
         is_bottom = abs(pad.y - min_y) < tolerance  
         is_left = abs(pad.x - min_x) < tolerance
         is_right = abs(pad.x - max_x) < tolerance
         
-        print(f"  Top?{is_top}, Bottom?{is_bottom}, Left?{is_left}, Right?{is_right}")
+        _dbg(f"  Top?{is_top}, Bottom?{is_bottom}, Left?{is_left}, Right?{is_right}")
         
         if is_top:
             top_pads.append(pad)
@@ -402,49 +424,49 @@ def quad(pattern, housing):
         elif is_right:
             right_pads.append(pad)
     
-    print(f"DEBUG: Found {len(top_pads)} top, {len(bottom_pads)} bottom, {len(left_pads)} left, {len(right_pads)} right pads")
+    _dbg(f"DEBUG: Found {len(top_pads)} top, {len(bottom_pads)} bottom, {len(left_pads)} left, {len(right_pads)} right pads")
     
     # Process top/bottom pads for horizontal constraints
     for pads_group, group_name in [(top_pads + bottom_pads, "top/bottom")]:
         for i, pad in enumerate(pads_group):
-            print(f"DEBUG: Processing {group_name} pad {i}: pos=({pad.x:.3f}, {pad.y:.3f})")
+            _dbg(f"DEBUG: Processing {group_name} pad {i}: pos=({pad.x:.3f}, {pad.y:.3f})")
             # For horizontal corner lines: find constraint from pads on top/bottom
             # Need the OUTER edge of the pad (farthest from body center)
             pad_edge_x = abs(pad.x) + pad.width/2  # outer edge distance from center
             
-            print(f"DEBUG: Pad {i} (top/bottom): pos=({pad.x:.3f}, {pad.y:.3f}), size={pad.width:.3f}x{pad.height:.3f}")
-            print(f"  pad_edge_x (outer) = {pad_edge_x:.3f}")
+            _dbg(f"DEBUG: Pad {i} (top/bottom): pos=({pad.x:.3f}, {pad.y:.3f}), size={pad.width:.3f}x{pad.height:.3f}")
+            _dbg(f"  pad_edge_x (outer) = {pad_edge_x:.3f}")
             
             # Corner line starts at body_x and extends inward toward center
             # For max allowable length: corner_length_x = body_x - silk_line_width - silk_pad_clearance - pad_edge_x
             max_length = body_x - silk_line_width - silk_pad_clearance - pad_edge_x
             
-            print(f"  calculation: {body_x:.3f} - {silk_line_width:.3f} - {silk_pad_clearance:.3f} - {pad_edge_x:.3f} = {max_length:.3f}")
+            _dbg(f"  calculation: {body_x:.3f} - {silk_line_width:.3f} - {silk_pad_clearance:.3f} - {pad_edge_x:.3f} = {max_length:.3f}")
             
             if max_length > 0:
                 max_corner_length_x = min(max_corner_length_x, max_length)
-                print(f"  updated max_corner_length_x = {max_corner_length_x:.3f}")
+                _dbg(f"  updated max_corner_length_x = {max_corner_length_x:.3f}")
     
     # Process left/right pads for vertical constraints  
     for pads_group, group_name in [(left_pads + right_pads, "left/right")]:
         for i, pad in enumerate(pads_group):
-            print(f"DEBUG: Processing {group_name} pad {i}: pos=({pad.x:.3f}, {pad.y:.3f})")
+            _dbg(f"DEBUG: Processing {group_name} pad {i}: pos=({pad.x:.3f}, {pad.y:.3f})")
             # For vertical corner lines: find constraint from pads on left/right
             # Need the OUTER edge of the pad (farthest from body center)
             pad_edge_y = abs(pad.y) + pad.height/2  # outer edge distance from center
             
-            print(f"DEBUG: Pad {i} (left/right): pos=({pad.x:.3f}, {pad.y:.3f}), size={pad.width:.3f}x{pad.height:.3f}")
-            print(f"  pad_edge_y (outer) = {pad_edge_y:.3f}")
+            _dbg(f"DEBUG: Pad {i} (left/right): pos=({pad.x:.3f}, {pad.y:.3f}), size={pad.width:.3f}x{pad.height:.3f}")
+            _dbg(f"  pad_edge_y (outer) = {pad_edge_y:.3f}")
             
             # Corner line starts at body_y and extends inward toward center
             # For max allowable length: corner_length_y = body_y - silk_line_width - silk_pad_clearance - pad_edge_y
             max_length = body_y - silk_line_width - silk_pad_clearance - pad_edge_y
             
-            print(f"  calculation: {body_y:.3f} - {silk_line_width:.3f} - {silk_pad_clearance:.3f} - {pad_edge_y:.3f} = {max_length:.3f}")
+            _dbg(f"  calculation: {body_y:.3f} - {silk_line_width:.3f} - {silk_pad_clearance:.3f} - {pad_edge_y:.3f} = {max_length:.3f}")
             
             if max_length > 0:
                 max_corner_length_y = min(max_corner_length_y, max_length)
-                print(f"  updated max_corner_length_y = {max_corner_length_y:.3f}")
+                _dbg(f"  updated max_corner_length_y = {max_corner_length_y:.3f}")
     
     # Use the calculated maximum lengths, with reasonable defaults if no constraints
     corner_length_x = max_corner_length_x if max_corner_length_x != float('inf') else body_width * 0.15
@@ -454,9 +476,8 @@ def quad(pattern, housing):
     corner_length_x = min(corner_length_x, body_width * 0.3)
     corner_length_y = min(corner_length_y, body_length * 0.3)
     
-    print(f"Calculated corner lengths (exact clearance): x={corner_length_x:.3f}, y={corner_length_y:.3f}")
-    
-    print(f"After 30% body constraint: x={corner_length_x:.3f}, y={corner_length_y:.3f}")
+    _dbg(f"Calculated corner lengths (exact clearance): x={corner_length_x:.3f}, y={corner_length_y:.3f}")
+    _dbg(f"After 30% body constraint: x={corner_length_x:.3f}, y={corner_length_y:.3f}")
     
     # Ensure minimum line length
     min_line_length = 0.2
@@ -468,7 +489,7 @@ def quad(pattern, housing):
     # Draw corner markers at each corner of the body
     # L-shaped markers pointing TOWARD the body center
     
-    print(f"\nDEBUG: Drawing lines with lengths x={corner_length_x:.3f}, y={corner_length_y:.3f}")
+    _dbg(f"DEBUG: Drawing lines with lengths x={corner_length_x:.3f}, y={corner_length_y:.3f}")
     
     # Calculate actual line end positions and verify clearances
     line_end_x = body_x - corner_length_x
@@ -476,8 +497,8 @@ def quad(pattern, housing):
     line_edge_x = line_end_x - silk_line_width/2  # edge of line considering thickness
     line_edge_y = line_end_y - silk_line_width/2
     
-    print(f"DEBUG: Line ends at: x={line_end_x:.3f}, y={line_end_y:.3f}")
-    print(f"DEBUG: Line edges at: x={line_edge_x:.3f}, y={line_edge_y:.3f}")
+    _dbg(f"DEBUG: Line ends at: x={line_end_x:.3f}, y={line_end_y:.3f}")
+    _dbg(f"DEBUG: Line edges at: x={line_edge_x:.3f}, y={line_edge_y:.3f}")
     
     # Find nearest pads to verify clearance
     nearest_pad_x = None
@@ -501,9 +522,9 @@ def quad(pattern, housing):
                 nearest_pad_y = pad
     
     if nearest_pad_x:
-        print(f"DEBUG: Nearest X-constraining pad: pos=({nearest_pad_x.x:.3f}, {nearest_pad_x.y:.3f}), clearance={min_dist_x:.3f}")
+        _dbg(f"DEBUG: Nearest X-constraining pad: pos=({nearest_pad_x.x:.3f}, {nearest_pad_x.y:.3f}), clearance={min_dist_x:.3f}")
     if nearest_pad_y:
-        print(f"DEBUG: Nearest Y-constraining pad: pos=({nearest_pad_y.x:.3f}, {nearest_pad_y.y:.3f}), clearance={min_dist_y:.3f}")
+        _dbg(f"DEBUG: Nearest Y-constraining pad: pos=({nearest_pad_y.x:.3f}, {nearest_pad_y.y:.3f}), clearance={min_dist_y:.3f}")
     
     # Top-left corner
     pattern.line(-body_x, body_y, -body_x + corner_length_x, body_y)   # horizontal (toward right)

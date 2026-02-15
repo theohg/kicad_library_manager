@@ -233,6 +233,9 @@ class FootprintGeneratorDialog(wx.Dialog):
         # Temp .pretty folder for preview generation (never committed).
         self._preview_pretty_dir = None
 
+        # Cache auto-generated name hints by density to avoid expensive recomputation on UI thread.
+        self._name_hints_cache: dict[str, str] = {}
+
         # Persisted state
         self._state = _load_state_best_effort()
         self._restoring = False
@@ -1331,43 +1334,50 @@ class FootprintGeneratorDialog(wx.Dialog):
         except Exception:
             pass
 
-        # Name hints are cheap.
-        name_hints: dict[str, str] = {}
-        for d in dens:
-            try:
-                name_hints[d] = compute_auto_name(kind=kind, density=d, name="", fields=fields) or ""
-            except Exception:
-                name_hints[d] = ""
-
-        for d, ctrl in list(self._nd_name.items()):
-            try:
-                ctrl.SetHint(name_hints.get(d, ""))
-            except Exception:
-                pass
-
-        # Description hints: compute in background (pattern build).
+        # IMPORTANT: for quad families (QFP/QFN/...), computing the auto name can be expensive.
+        # Never do it on the UI thread.
+        #
+        # Compute BOTH name and description hints in background.
         self._hint_job_id += 1
         job_id = int(self._hint_job_id)
 
         def work():
-            out: dict[str, str] = {}
+            out_name: dict[str, str] = {}
+            out_desc: dict[str, str] = {}
             for d in dens:
-                nm = name_hints.get(d) or compute_auto_name(kind=kind, density=d, name="", fields=fields) or ""
+                nm = compute_auto_name(kind=kind, density=d, name="", fields=fields) or ""
+                out_name[d] = nm
                 element = element_from_fields(kind=kind, density=d, name=nm, fields=fields)
                 pat = build_pattern(kind, element)
-                out[d] = str(getattr(pat, "description", "") or "")
-            return out
+                out_desc[d] = str(getattr(pat, "description", "") or "")
+            return {"name": out_name, "desc": out_desc}
 
         def done(res, err):
             if err or not isinstance(res, dict):
                 return
             if job_id != self._hint_job_id:
                 return
-            for d, ctrl in list(self._nd_desc.items()):
+            name_map = res.get("name") if isinstance(res.get("name"), dict) else {}
+            desc_map = res.get("desc") if isinstance(res.get("desc"), dict) else {}
+            try:
+                self._name_hints_cache = {str(k): str(v or "") for k, v in (name_map or {}).items()}
+            except Exception:
+                self._name_hints_cache = {}
+            for d, ctrl in list(self._nd_name.items()):
                 try:
-                    ctrl.SetHint(str(res.get(d, "") or ""))
+                    ctrl.SetHint(str((name_map or {}).get(d, "") or ""))
                 except Exception:
                     pass
+            for d, ctrl in list(self._nd_desc.items()):
+                try:
+                    ctrl.SetHint(str((desc_map or {}).get(d, "") or ""))
+                except Exception:
+                    pass
+            # With name hints available, a previously deferred preview render can proceed.
+            try:
+                self._schedule_preview_update()
+            except Exception:
+                pass
 
         _run_in_bg(work, done)
 
@@ -1437,7 +1447,19 @@ class FootprintGeneratorDialog(wx.Dialog):
         kind = self.kind.GetStringSelection() or "soic"
         density = self._density_for_preview()
         fields = self._gather_fields(include_nominal_mean=True)
-        name = self._override_name_for(density) or (compute_auto_name(kind=kind, density=density, name="", fields=fields) or "")
+        # Avoid expensive auto-name computation on the UI thread.
+        name = self._override_name_for(density) or (getattr(self, "_name_hints_cache", {}).get(density) or "")
+        if not name:
+            try:
+                self.prev_status.SetLabel("Computing preview…")
+            except Exception:
+                pass
+            try:
+                self._schedule_hints_update()
+            except Exception:
+                pass
+            # We'll re-trigger preview after hints job completes.
+            return
         desc_override = self._override_desc_for(density)
 
         try:
