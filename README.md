@@ -212,6 +212,45 @@ This installs the Homebrew `sqliteodbc` formula (which depends on `unixodbc`) an
 
 ---
 
+### 5b) Preview rendering dependencies (symbols / footprints)
+
+The plugin’s symbol/footprint previews render SVGs and then rasterize them for display.
+On some systems (especially macOS), you may need to install an SVG rasterizer.
+
+#### macOS (Homebrew)
+
+```bash
+brew install librsvg
+```
+
+Alternative:
+
+```bash
+brew install --cask inkscape
+```
+
+Restart KiCad after installing.
+
+#### Linux
+
+- Debian/Ubuntu:
+
+```bash
+sudo apt install librsvg2-bin
+```
+
+- Fedora:
+
+```bash
+sudo dnf install librsvg2-tools
+```
+
+#### Windows
+
+Install Inkscape and ensure `inkscape` is available on `PATH`, then restart KiCad.
+
+---
+
 ### Status colors (icons)
 
 - **Green**: up to date / clean
