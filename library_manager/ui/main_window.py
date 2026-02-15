@@ -17,7 +17,7 @@ import wx.grid as gridlib
 
 from ..config import Config
 from ..repo import Category, list_categories, is_repo_root
-from .async_ui import UiRepeater, WindowTaskRunner, is_window_alive
+from .async_ui import UiDebouncer, UiRepeater, WindowTaskRunner, is_window_alive
 from .browse_window import BrowseDialog
 from .dialogs import RepoSettingsDialog
 from .git_ops import (
@@ -67,6 +67,9 @@ class MainDialog(wx.Frame):
         self._cfg = Config.load_effective(repo_path)
         self._categories: list[Category] = []
         self._tasks = WindowTaskRunner(self)
+        # Separate task runner for history to allow cancelling history loads without
+        # disrupting other background tasks (remote poll, diff computations, etc.).
+        self._hist_tasks = WindowTaskRunner(self)
         self._did_autosize_cat_cols = False
         self._remote_cat_updated_ts_by_path: dict[str, int] = {}
         self._remote_cat_updated_loading = False
@@ -237,6 +240,21 @@ class MainDialog(wx.Frame):
         self._hist_rows: list[dict[str, str]] = []
         self._hist_for_path: str | None = None
         self._set_history_rows([])
+        # Debounce history loads so scrolling the category list stays responsive.
+        self._hist_debouncer = UiDebouncer(self, delay_ms=250, callback=self._refresh_selected_category_history_async)
+
+    def _schedule_history_refresh(self) -> None:
+        """
+        Debounced refresh of the History panel for the currently selected category.
+        Prevents running `git log` on every intermediate selection while the user scrolls.
+        """
+        try:
+            if getattr(self, "_hist_debouncer", None):
+                self._hist_debouncer.trigger(delay_ms=250)
+                return
+        except Exception:
+            pass
+        self._refresh_selected_category_history_async()
 
     def _repo_ready(self) -> tuple[bool, str]:
         """
@@ -438,6 +456,14 @@ class MainDialog(wx.Frame):
         self._asset_index_prefetch_started = True
 
         def _do() -> None:
+            # IMPORTANT: avoid doing heavy work during initial window show/layout.
+            # Even background threads doing CPU-heavy Python parsing can starve the wx UI
+            # thread due to the GIL. We defer slightly and only run once the window is shown.
+            try:
+                if not self.IsShown():
+                    return
+            except Exception:
+                pass
             rp = str(getattr(self, "_repo_path", "") or "")
             if not rp:
                 return
@@ -492,13 +518,17 @@ class MainDialog(wx.Frame):
                                 local_first.append(nick)
                             else:
                                 global_after.append(nick)
-                        libs = sorted(set(local_first)) + sorted(set([x for x in global_after if x not in set(local_first)]))
+                        local_libs = sorted(set(local_first))
+                        global_libs = sorted(set([x for x in global_after if x not in set(local_first)]))
                         # IMPORTANT: even in a background thread, heavy Python parsing can
                         # momentarily starve the wx UI thread due to the GIL. Throttle the
                         # work so the main window stays smooth.
                         import time as _time
                         batch = 0
-                        for lib in libs:
+
+                        # Phase 1: prefetch repo-local libs quickly (these are usually small
+                        # and most relevant to the current database).
+                        for lib in local_libs:
                             if not is_window_alive(self):
                                 return
                             try:
@@ -516,6 +546,30 @@ class MainDialog(wx.Frame):
                                     _time.sleep(0.08)
                                 except Exception:
                                     pass
+
+                        # Phase 2: prefetch global/project libs later (can be large).
+                        if global_libs:
+                            try:
+                                _time.sleep(3.0)
+                            except Exception:
+                                pass
+                        for lib in global_libs:
+                            if not is_window_alive(self):
+                                return
+                            try:
+                                SYMBOL_LIBCACHE.ensure_meta_loaded(rp, lib, wait_s=0.0)
+                            except Exception:
+                                continue
+                            batch += 1
+                            try:
+                                _time.sleep(0.01)
+                            except Exception:
+                                pass
+                            if batch % 6 == 0:
+                                try:
+                                    _time.sleep(0.12)
+                                except Exception:
+                                    pass
                     except Exception:
                         return
 
@@ -523,10 +577,29 @@ class MainDialog(wx.Frame):
             except Exception:
                 pass
 
+        # Defer prefetch so the main window becomes interactive immediately.
         try:
-            wx.CallAfter(_do)
+            import threading as _threading
+
+            def _later() -> None:
+                if not is_window_alive(self):
+                    return
+                try:
+                    wx.CallAfter(_do)
+                except Exception:
+                    try:
+                        _do()
+                    except Exception:
+                        pass
+
+            t = _threading.Timer(1.25, _later)
+            t.daemon = True
+            t.start()
         except Exception:
-            _do()
+            try:
+                wx.CallAfter(_do)
+            except Exception:
+                _do()
 
     def _start_remote_polling(self) -> None:
         if getattr(self, "_remote_poll_repeater", None):
@@ -629,7 +702,7 @@ class MainDialog(wx.Frame):
                     self._reload_category_statuses()
                     self._refresh_remote_cat_updated_times_async()
                     self._refresh_categories_status_icon()
-                    self._refresh_selected_category_history_async()
+                    self._schedule_history_refresh()
                 except Exception:
                     pass
                 return
@@ -663,6 +736,15 @@ class MainDialog(wx.Frame):
         """
         try:
             self._tasks.cancel_pending()
+        except Exception:
+            pass
+        try:
+            self._hist_tasks.cancel_pending()
+        except Exception:
+            pass
+        try:
+            if getattr(self, "_hist_debouncer", None):
+                self._hist_debouncer.cancel()
         except Exception:
             pass
         for attr in ("_fpgen_win", "_browse_fp_win", "_browse_sym_win", "_browse_cat_win"):
@@ -1021,7 +1103,7 @@ class MainDialog(wx.Frame):
             self._reload_category_statuses()
             self._refresh_remote_cat_updated_times_async()
             self._refresh_categories_status_icon()
-            self._refresh_selected_category_history_async()
+            self._schedule_history_refresh()
 
         self._tasks.run(work, done)
 
@@ -1872,7 +1954,7 @@ class MainDialog(wx.Frame):
 
         self._cat_row_items = row_items
         self.cat_list.Thaw()
-        self._refresh_selected_category_history_async()
+        self._schedule_history_refresh()
 
     def _selected_category(self) -> Category | None:
         try:
@@ -1887,7 +1969,7 @@ class MainDialog(wx.Frame):
         return None
 
     def _on_category_selected(self, _evt: wx.ListEvent) -> None:
-        self._refresh_selected_category_history_async()
+        self._schedule_history_refresh()
 
     def _refresh_selected_category_history_async(self) -> None:
         cat = self._selected_category()
@@ -1898,7 +1980,7 @@ class MainDialog(wx.Frame):
             return
         rel_path = f"Database/{cat.filename}"
         self._hist_for_path = rel_path
-        self._hist_title.SetLabel(f"History: {category_title(cat)}")
+        self._hist_title.SetLabel(f"History: {category_title(cat)} (loading)")
 
         try:
             br = (self._cfg.github_base_branch or "main").strip() or "main"
@@ -1918,14 +2000,29 @@ class MainDialog(wx.Frame):
         def done(res: list[dict[str, str]] | None, err: Exception | None) -> None:
             if not is_window_alive(self):
                 return
+            # Drop stale history results if selection has changed since this job started.
+            if self._hist_for_path != rel_path:
+                return
             if err:
                 self._append_log(f"History load failed: {err}")
                 self._set_history_rows([])
                 return
+            try:
+                self._hist_title.SetLabel(f"History: {category_title(cat)}")
+            except Exception:
+                pass
             self._set_history_rows(list(res or []))
 
-        self._set_history_rows([])  # clear immediately to indicate refresh
-        self._tasks.run(work, done)
+        # Cancel any in-flight history load and start a new one.
+        try:
+            self._hist_tasks.cancel_pending()
+        except Exception:
+            pass
+        try:
+            self._hist_show_btn.Enable(False)
+        except Exception:
+            pass
+        self._hist_tasks.run(work, done)
 
     def _set_history_rows(self, rows: list[dict[str, str]]) -> None:
         self._hist_rows = list(rows or [])
