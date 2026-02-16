@@ -52,9 +52,14 @@ def library_display_name(repo_path: str, cfg: Config | None = None) -> str:
 
 def with_library_suffix(title: str, repo_path: str, cfg: Config | None = None) -> str:
     """
-    Append "— <library>" when we can determine the library name.
+    Append version and "— <library>" when we can determine the library name.
     """
     t = str(title or "").strip()
+    try:
+        from .. import __version__
+        t = f"{t} v{__version__}"
+    except Exception:
+        pass
     name = library_display_name(repo_path, cfg=cfg)
     return f"{t} — {name}" if name else t
 
