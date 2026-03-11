@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import threading
 import time
@@ -30,6 +31,25 @@ def _git_env_no_prompt() -> dict[str, str]:
     # Git Credential Manager (if present): never show UI prompts.
     env["GCM_INTERACTIVE"] = "Never"
     env["GCM_GUI_PROMPT"] = "0"
+    # Ensure caller-side tracing does not pollute stdout parsing.
+    # This plugin parses command outputs (e.g. SHAs), so trace streams must be disabled.
+    for k in (
+        "GIT_TRACE",
+        "GIT_TRACE_PACKET",
+        "GIT_TRACE_PERFORMANCE",
+        "GIT_TRACE_SETUP",
+        "GIT_TRACE_SHALLOW",
+        "GIT_TRACE_PACK_ACCESS",
+        "GIT_TRACE_PACKFILE",
+        "GIT_TRACE_REDACT",
+        "GIT_TRACE_FSMONITOR",
+        "GIT_TRACE_BARE",
+        "GIT_TRACE2",
+        "GIT_TRACE2_EVENT",
+        "GIT_TRACE2_PERF",
+        "GIT_TRACE2_CONFIG_PARAMS",
+    ):
+        env.pop(k, None)
     return env
 
 
@@ -102,16 +122,14 @@ def git_ls_remote_head_sha(repo_path: str, *, remote: str = "origin", branch: st
 
     Returns the SHA for refs/heads/<branch> from <remote> using `git ls-remote`.
     """
-    env = dict(os.environ)
-    # Ensure we never block on interactive credential prompts.
-    env["GIT_TERMINAL_PROMPT"] = "0"
+    env = _git_env_no_prompt()
     try:
         with _GIT_LOCK:
             cp = subprocess.run(
                 ["git", "-C", repo_path, "ls-remote", "--heads", remote, branch],
                 check=False,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                stderr=subprocess.PIPE,
                 encoding="utf-8",
                 errors="replace",
                 env=env,
@@ -121,14 +139,23 @@ def git_ls_remote_head_sha(repo_path: str, *, remote: str = "origin", branch: st
     except subprocess.TimeoutExpired as e:
         raise RuntimeError(f"git ls-remote timed out after {timeout_s}s") from e
     out = (cp.stdout or "").strip()
+    err_out = (cp.stderr or "").strip()
     if cp.returncode != 0:
-        raise RuntimeError(f"git ls-remote failed:\n{out}")
+        msg = out or err_out
+        raise RuntimeError(f"git ls-remote failed:\n{msg}")
     # Expected: "<sha>\trefs/heads/<branch>"
     if not out:
         raise RuntimeError("ls-remote returned no output")
-    first = out.splitlines()[0].strip()
-    sha = first.split()[0].strip()
-    if not sha or len(sha) < 7:
+    # Be robust in case extra lines appear; choose the first canonical
+    # refs/heads/<branch> line with a 40-hex SHA.
+    sha = ""
+    pat = re.compile(rf"^\s*([0-9a-f]{{40}})\s+refs/heads/{re.escape(branch)}\s*$", re.IGNORECASE)
+    for line in out.splitlines():
+        m = pat.match((line or "").strip())
+        if m:
+            sha = m.group(1).lower()
+            break
+    if not sha:
         raise RuntimeError("ls-remote output parse failed")
     return sha
 
@@ -444,6 +471,7 @@ def git_status_entries(repo_path: str) -> list[tuple[str, str]]:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=False,
+            env=_git_env_no_prompt(),
             **SUBPROCESS_NO_WINDOW,
         )
     if cp.returncode != 0:
@@ -657,6 +685,7 @@ def git_diff_name_status(repo_path: str, a: str, b: str, paths: list[str]) -> li
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=False,
+            env=_git_env_no_prompt(),
             **SUBPROCESS_NO_WINDOW,
         )
     if cp.returncode != 0:

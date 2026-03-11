@@ -46,6 +46,50 @@ def resolve_kicad_cli() -> str:
         _KICAD_CLI_PATH = p
         return p
 
+    # Windows: KiCad IPC plugin environment often has a minimal PATH.
+    # Probe likely install locations and KiCad-derived paths from sys.path.
+    if sys.platform == "win32":
+        cands: list[str] = []
+        try:
+            # If sys.path contains ".../KiCad/<ver>/bin/python311.zip", infer bin dir.
+            for sp in list(sys.path):
+                s = str(sp or "").strip()
+                if not s:
+                    continue
+                low = s.lower().replace("/", "\\")
+                if low.endswith("\\python311.zip") or low.endswith("\\python312.zip") or low.endswith("\\dlls"):
+                    b = os.path.dirname(s)
+                    cands.append(os.path.join(b, "kicad-cli.exe"))
+                    # Handle DLLs case by checking sibling bin.
+                    cands.append(os.path.join(os.path.dirname(b), "bin", "kicad-cli.exe"))
+        except Exception:
+            pass
+        try:
+            pf = str(os.environ.get("ProgramFiles") or r"C:\Program Files").strip() or r"C:\Program Files"
+            pfx86 = str(os.environ.get("ProgramFiles(x86)") or r"C:\Program Files (x86)").strip() or r"C:\Program Files (x86)"
+            for base in (pf, pfx86):
+                cands.extend(sorted(_glob.glob(os.path.join(base, "KiCad", "*", "bin", "kicad-cli.exe"))))
+                cands.extend(sorted(_glob.glob(os.path.join(base, "KiCad*", "bin", "kicad-cli.exe"))))
+                cands.append(os.path.join(base, "KiCad", "bin", "kicad-cli.exe"))
+        except Exception:
+            pass
+        # De-dup while preserving order.
+        seen: set[str] = set()
+        for cand in cands:
+            try:
+                ap = os.path.abspath(str(cand or "").strip())
+            except Exception:
+                ap = str(cand or "").strip()
+            if not ap or ap in seen:
+                continue
+            seen.add(ap)
+            try:
+                if os.path.isfile(ap):
+                    _KICAD_CLI_PATH = ap
+                    return ap
+            except Exception:
+                continue
+
     # macOS app bundle locations (KiCad 7/8/9).
     if sys.platform == "darwin":
         cands: list[str] = []
@@ -66,6 +110,8 @@ def resolve_kicad_cli() -> str:
         "Fix:\n"
         "- Ensure KiCad is installed, and that `kicad-cli` is available, or\n"
         "- Set environment variable KICAD_CLI to the full path of the kicad-cli executable.\n\n"
+        "On Windows, a common path is:\n"
+        "  C:\\Program Files\\KiCad\\9.0\\bin\\kicad-cli.exe\n\n"
         "On macOS, a common path is:\n"
         "  /Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli"
     )

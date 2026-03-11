@@ -52,7 +52,29 @@ from .pending import (
 from .services import category_title
 from .widgets import SearchPickerDialog
 from .assets.status import local_asset_paths
+from .cache_dir import plugin_cache_dir
 from .window_title import with_library_suffix
+
+
+def _ui_trace_log(msg: str) -> None:
+    """
+    Best-effort UI diagnostics log.
+    Kept separate from the visible output pane so freeze-related clues survive.
+    """
+    try:
+        ts = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        p = os.path.join(plugin_cache_dir(), "ipc_plugin_boot.log")
+        with open(p, "a", encoding="utf-8", errors="ignore") as f:
+            f.write(f"[{ts}] [ui] {msg}\n")
+    except Exception:
+        return
+
+
+def _ms_since(t0: float) -> float:
+    try:
+        return max(0.0, (time.time() - float(t0)) * 1000.0)
+    except Exception:
+        return 0.0
 
 
 class MainDialog(wx.Frame):
@@ -84,10 +106,23 @@ class MainDialog(wx.Frame):
         self._remote_backoff_s = self._remote_poll_s
         self._remote_poll_inflight = False
         self._remote_poll_repeater: UiRepeater | None = None
+        self._unchanged_remote_refresh_min_s = 20.0
+        self._last_unchanged_remote_refresh_ts = 0.0
+        self._db_remote_changed_cache_branch = ""
+        self._db_remote_changed_cache_ts = 0.0
+        self._db_remote_changed_cache: set[str] = set()
         self._asset_index_prefetch_started = False
         # While a modal settings dialog is open, pause background UI activity
         # so it can't steal focus or show message boxes behind the dialog.
         self._modal_settings_open = False
+        try:
+            br0 = (self._cfg.github_base_branch or "main").strip() or "main"
+        except Exception:
+            br0 = "main"
+        _ui_trace_log(
+            "MainDialog init "
+            f"pid={os.getpid()} repo={self._repo_path!r} project={self._project_path!r} branch={br0!r}"
+        )
 
         self._bmp_green = make_status_bitmap(wx.Colour(46, 160, 67))
         self._bmp_red = make_status_bitmap(wx.Colour(220, 53, 69))
@@ -640,74 +675,133 @@ class MainDialog(wx.Frame):
         - backoff exponentially on errors up to 60s
         """
         if bool(getattr(self, "_setup_mode", False)) or bool(getattr(self, "_modal_settings_open", False)):
+            _ui_trace_log(
+                "poll skip: setup/modal "
+                f"setup={bool(getattr(self, '_setup_mode', False))} "
+                f"modal={bool(getattr(self, '_modal_settings_open', False))}"
+            )
             return
         if not is_window_alive(self):
+            _ui_trace_log("poll skip: window not alive")
             return
         try:
             if not self.IsShown():
+                _ui_trace_log("poll skip: window hidden")
                 return
         except Exception:
             pass
         if self._remote_poll_inflight:
+            _ui_trace_log("poll skip: inflight")
             return
         now = time.time()
-        if (now - float(self._last_remote_check_ts or 0.0)) < float(self._remote_backoff_s or 0.0):
+        delta_s = now - float(self._last_remote_check_ts or 0.0)
+        backoff_s = float(self._remote_backoff_s or 0.0)
+        if delta_s < backoff_s:
+            _ui_trace_log(f"poll skip: throttle delta_s={delta_s:.3f} backoff_s={backoff_s:.3f}")
             return
         self._last_remote_check_ts = now
         self._remote_poll_inflight = True
+        _ui_trace_log(f"poll start: backoff_s={backoff_s:.3f} last_remote_sha={self._last_remote_sha!r}")
+        ls_done_ts = [0.0]
 
         def work() -> str:
             # Check remote head SHA without GitHub API calls.
+            t0 = time.time()
             try:
                 branch = (self._cfg.github_base_branch or "main").strip() or "main"
             except Exception:
                 branch = "main"
-            return git_ls_remote_head_sha(self._repo_path, remote="origin", branch=branch, timeout_s=3.0)
+            _ui_trace_log(f"poll work: ls-remote start branch={branch!r}")
+            sha = git_ls_remote_head_sha(self._repo_path, remote="origin", branch=branch, timeout_s=3.0)
+            ls_done_ts[0] = time.time()
+            _ui_trace_log(f"poll work: ls-remote done sha={sha!r} elapsed_ms={(time.time() - t0) * 1000.0:.1f}")
+            return sha
 
         def done(sha: str | None, err: Exception | None) -> None:
-            self._remote_poll_inflight = False
-            if not is_window_alive(self):
-                return
-            if bool(getattr(self, "_modal_settings_open", False)):
-                return
-            if err or not sha:
+            try:
+                if ls_done_ts[0] > 0.0:
+                    _ui_trace_log(f"poll done: ui_queue_delay_ms={_ms_since(ls_done_ts[0]):.1f}")
+                if not is_window_alive(self):
+                    _ui_trace_log("poll done: window not alive")
+                    return
+                if bool(getattr(self, "_modal_settings_open", False)):
+                    _ui_trace_log("poll done: modal open")
+                    return
+                if err or not sha:
+                    try:
+                        self._remote_backoff_s = min(float(self._remote_backoff_s) * 2.0, 60.0)
+                    except Exception:
+                        self._remote_backoff_s = 60.0
+                    _ui_trace_log(f"poll done: error={err!r} sha={sha!r} new_backoff_s={self._remote_backoff_s}")
+                    return
+                # Cache last successful remote SHA (used to validate local origin/<branch> freshness
+                # even if FETCH_HEAD is old).
                 try:
-                    self._remote_backoff_s = min(float(self._remote_backoff_s) * 2.0, 60.0)
+                    branch2 = (self._cfg.github_base_branch or "main").strip() or "main"
                 except Exception:
-                    self._remote_backoff_s = 60.0
-                return
-            # Cache last successful remote SHA (used to validate local origin/<branch> freshness
-            # even if FETCH_HEAD is old).
-            try:
-                branch2 = (self._cfg.github_base_branch or "main").strip() or "main"
-            except Exception:
-                branch2 = "main"
-            try:
-                write_remote_head_sha_cache(self._repo_path, branch=branch2, remote_sha=str(sha or "").strip())
-            except Exception:
-                pass
-            self._remote_backoff_s = self._remote_poll_s
-            # Avoid an unnecessary fetch on startup when local origin/<branch> already matches remote.
-            try:
-                local_sha = local_remote_tracking_sha(self._repo_path, branch=branch2) or ""
-            except Exception:
-                local_sha = ""
-            if local_sha and str(local_sha).strip() == str(sha).strip():
-                self._last_remote_sha = sha
-                # Refresh UI now that stale heuristics can use the cached remote SHA.
+                    branch2 = "main"
                 try:
-                    self._refresh_sync_status()
-                    self._refresh_assets_status()
-                    self._reload_category_statuses()
-                    self._refresh_remote_cat_updated_times_async()
-                    self._refresh_categories_status_icon()
-                    self._schedule_history_refresh()
+                    write_remote_head_sha_cache(self._repo_path, branch=branch2, remote_sha=str(sha or "").strip())
                 except Exception:
                     pass
-                return
-            if sha != self._last_remote_sha:
-                self._last_remote_sha = sha
-                self._on_refresh_status(None)
+                self._remote_backoff_s = self._remote_poll_s
+                # Avoid an unnecessary fetch on startup when local origin/<branch> already matches remote.
+                try:
+                    local_sha = local_remote_tracking_sha(self._repo_path, branch=branch2) or ""
+                except Exception:
+                    local_sha = ""
+                _ui_trace_log(
+                    "poll decision: "
+                    f"remote_sha={str(sha).strip()!r} "
+                    f"local_sha={str(local_sha).strip()!r} "
+                    f"last_remote_sha={self._last_remote_sha!r} "
+                    f"branch={branch2!r}"
+                )
+                if local_sha and str(local_sha).strip() == str(sha).strip():
+                    self._last_remote_sha = sha
+                    now2 = time.time()
+                    if (
+                        (now2 - float(getattr(self, "_last_unchanged_remote_refresh_ts", 0.0) or 0.0))
+                        < float(getattr(self, "_unchanged_remote_refresh_min_s", 20.0) or 20.0)
+                    ):
+                        _ui_trace_log("poll decision: skip fetch + skip heavy ui refresh (unchanged remote throttled)")
+                        return
+                    self._last_unchanged_remote_refresh_ts = now2
+                    _ui_trace_log("poll decision: skip fetch (local origin SHA already matches remote)")
+                    # Refresh UI periodically so status labels still catch local changes.
+                    t_ui = time.time()
+                    try:
+                        t1 = time.time()
+                        self._refresh_sync_status()
+                        _ui_trace_log(f"poll ui refresh: _refresh_sync_status elapsed_ms={_ms_since(t1):.1f}")
+                        t1 = time.time()
+                        self._refresh_assets_status()
+                        _ui_trace_log(f"poll ui refresh: _refresh_assets_status elapsed_ms={_ms_since(t1):.1f}")
+                        t1 = time.time()
+                        self._reload_category_statuses()
+                        _ui_trace_log(f"poll ui refresh: _reload_category_statuses elapsed_ms={_ms_since(t1):.1f}")
+                        t1 = time.time()
+                        self._refresh_remote_cat_updated_times_async()
+                        _ui_trace_log(f"poll ui refresh: _refresh_remote_cat_updated_times_async elapsed_ms={_ms_since(t1):.1f}")
+                        t1 = time.time()
+                        self._refresh_categories_status_icon()
+                        _ui_trace_log(f"poll ui refresh: _refresh_categories_status_icon elapsed_ms={_ms_since(t1):.1f}")
+                        t1 = time.time()
+                        self._schedule_history_refresh()
+                        _ui_trace_log(f"poll ui refresh: _schedule_history_refresh elapsed_ms={_ms_since(t1):.1f}")
+                    except Exception:
+                        pass
+                    _ui_trace_log(f"poll ui refresh total elapsed_ms={_ms_since(t_ui):.1f}")
+                    return
+                if sha != self._last_remote_sha:
+                    prev = self._last_remote_sha
+                    self._last_remote_sha = sha
+                    _ui_trace_log(f"poll decision: trigger fetch (remote SHA changed) prev={prev!r} new={sha!r}")
+                    self._on_refresh_status(None, reason="remote_sha_changed")
+                else:
+                    _ui_trace_log("poll decision: no fetch (remote SHA unchanged)")
+            finally:
+                self._remote_poll_inflight = False
 
         self._tasks.run(work, done)
 
@@ -770,6 +864,36 @@ class MainDialog(wx.Frame):
             text += "\n"
         self.log.AppendText(text)
 
+    def _remote_database_changed_paths(self, branch: str, *, max_age_s: float = 2.0) -> set[str]:
+        """
+        Return changed repo-relative paths under Database/ between HEAD and origin/<branch>.
+
+        Uses a short-lived cache to avoid running the same expensive git diff multiple
+        times during one UI refresh burst.
+        """
+        br = str(branch or "").strip() or "main"
+        now = time.time()
+        if (
+            br == str(getattr(self, "_db_remote_changed_cache_branch", "") or "")
+            and (now - float(getattr(self, "_db_remote_changed_cache_ts", 0.0) or 0.0)) <= float(max_age_s)
+        ):
+            try:
+                return set(getattr(self, "_db_remote_changed_cache", set()) or set())
+            except Exception:
+                pass
+        rows = git_diff_name_status(self._repo_path, "HEAD", f"origin/{br}", ["Database"])
+        changed: set[str] = set()
+        for _st, p in (rows or []):
+            p2 = str(p or "").replace("\\", "/").strip()
+            if not p2:
+                continue
+            if p2 == "Database" or p2.startswith("Database/"):
+                changed.add(p2)
+        self._db_remote_changed_cache_branch = br
+        self._db_remote_changed_cache_ts = now
+        self._db_remote_changed_cache = set(changed)
+        return changed
+
     def _refresh_sync_status(self) -> None:
         try:
             st = git_sync_status(self._repo_path)
@@ -818,6 +942,7 @@ class MainDialog(wx.Frame):
                 else:
                     # If not behind, check per-category diffs vs remote tracking branch.
                     try:
+                        changed_db = self._remote_database_changed_paths(br)
                         for cat in (self._categories or list_categories(self._repo_path)):
                             # If this category has ANY pending request, ignore its diff vs remote
                             # when computing global "out of date" status; we should show
@@ -828,8 +953,7 @@ class MainDialog(wx.Frame):
                                 has_pend = False
                             if has_pend:
                                 continue
-                            changed = git_diff_name_status(self._repo_path, "HEAD", f"origin/{br}", [f"Database/{cat.filename}"])
-                            if changed:
+                            if f"Database/{cat.filename}" in changed_db:
                                 any_red = True
                                 break
                     except Exception:
@@ -1032,6 +1156,7 @@ class MainDialog(wx.Frame):
             br = "main"
         any_red = False
         try:
+            changed_db = self._remote_database_changed_paths(br)
             for cat in (self._categories or list_categories(self._repo_path)):
                 name = str(getattr(cat, "display_name", "") or "").strip()
                 if name:
@@ -1040,8 +1165,7 @@ class MainDialog(wx.Frame):
                             continue
                     except Exception:
                         pass
-                changed = git_diff_name_status(self._repo_path, "HEAD", f"origin/{br}", [f"Database/{cat.filename}"])
-                if changed:
+                if f"Database/{cat.filename}" in changed_db:
                     any_red = True
                     break
         except Exception:
@@ -1053,8 +1177,15 @@ class MainDialog(wx.Frame):
         except Exception:
             pass
 
-    def _on_refresh_status(self, _evt: wx.CommandEvent | None) -> None:
+    def _on_refresh_status(self, _evt: wx.CommandEvent | None, reason: str | None = None) -> None:
         br = (self._cfg.github_base_branch or "main").strip() or "main"
+        why = str(reason or ("manual_button" if _evt is not None else "internal")).strip()
+        fetch_t0 = time.time()
+        _ui_trace_log(
+            "fetch start: "
+            f"reason={why!r} branch={br!r} "
+            f"last_remote_sha={self._last_remote_sha!r} repo={self._repo_path!r}"
+        )
         self._append_log("Fetching remote (background)...")
         try:
             self.sync_label.SetLabel("Fetching remote...")
@@ -1067,7 +1198,9 @@ class MainDialog(wx.Frame):
             pass
 
         def work() -> bool:
+            t0 = time.time()
             run_git(["git", "fetch", "origin", br, "--quiet"], cwd=self._repo_path)
+            _ui_trace_log(f"fetch work: success elapsed_ms={(time.time() - t0) * 1000.0:.1f} branch={br!r}")
             return True
 
         def done(_res: bool | None, err: Exception | None) -> None:
@@ -1079,12 +1212,20 @@ class MainDialog(wx.Frame):
             except Exception:
                 pass
             if err:
+                _ui_trace_log(
+                    "fetch done: error "
+                    f"reason={why!r} elapsed_ms={(time.time() - fetch_t0) * 1000.0:.1f} err={err!r}"
+                )
                 self._append_log(f"Fetch remote failed: {err}")
                 try:
                     wx.MessageBox(str(err), "Fetch remote failed", wx.OK | wx.ICON_WARNING)
                 except Exception:
                     pass
             else:
+                _ui_trace_log(
+                    "fetch done: success "
+                    f"reason={why!r} elapsed_ms={(time.time() - fetch_t0) * 1000.0:.1f}"
+                )
                 self._append_log(f"Fetched origin/{br} from remote.")
                 # Update pending request states (yellow -> blue transitions) based on request file presence on origin/<branch>.
                 try:
@@ -1100,12 +1241,26 @@ class MainDialog(wx.Frame):
                                 continue
                     except Exception:
                         pass
+            t_ui = time.time()
+            t1 = time.time()
             self._refresh_sync_status()
+            _ui_trace_log(f"fetch ui refresh: _refresh_sync_status elapsed_ms={_ms_since(t1):.1f}")
+            t1 = time.time()
             self._refresh_assets_status()
+            _ui_trace_log(f"fetch ui refresh: _refresh_assets_status elapsed_ms={_ms_since(t1):.1f}")
+            t1 = time.time()
             self._reload_category_statuses()
+            _ui_trace_log(f"fetch ui refresh: _reload_category_statuses elapsed_ms={_ms_since(t1):.1f}")
+            t1 = time.time()
             self._refresh_remote_cat_updated_times_async()
+            _ui_trace_log(f"fetch ui refresh: _refresh_remote_cat_updated_times_async elapsed_ms={_ms_since(t1):.1f}")
+            t1 = time.time()
             self._refresh_categories_status_icon()
+            _ui_trace_log(f"fetch ui refresh: _refresh_categories_status_icon elapsed_ms={_ms_since(t1):.1f}")
+            t1 = time.time()
             self._schedule_history_refresh()
+            _ui_trace_log(f"fetch ui refresh: _schedule_history_refresh elapsed_ms={_ms_since(t1):.1f}")
+            _ui_trace_log(f"fetch ui refresh total elapsed_ms={_ms_since(t_ui):.1f}")
 
         self._tasks.run(work, done)
 
@@ -1799,6 +1954,11 @@ class MainDialog(wx.Frame):
 
         rows: list[dict] = []
         existing_names: set[str] = set()
+        try:
+            br = (self._cfg.github_base_branch or "main").strip() or "main"
+            changed_db = self._remote_database_changed_paths(br)
+        except Exception:
+            changed_db = None
         for cat in self._categories:
             try:
                 existing_names.add(str(getattr(cat, "display_name", "") or "").strip())
@@ -1806,15 +1966,13 @@ class MainDialog(wx.Frame):
                 pass
             status_ok = True
             status_text = "up to date"
-            try:
-                br = (self._cfg.github_base_branch or "main").strip() or "main"
-                changed = git_diff_name_status(self._repo_path, "HEAD", f"origin/{br}", [f"Database/{cat.filename}"])
-                if changed:
-                    status_ok = False
-                    status_text = "out of date"
-            except Exception:
+            if changed_db is None:
                 status_ok = False
                 status_text = "unknown"
+            else:
+                if f"Database/{cat.filename}" in changed_db:
+                    status_ok = False
+                    status_text = "out of date"
 
             updated_ts = None
             try:
