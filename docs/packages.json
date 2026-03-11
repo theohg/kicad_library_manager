@@ -21,6 +21,21 @@
       },
       "versions": [
         {
+          "version": "1.3.7",
+          "status": "stable",
+          "kicad_version": "9.0",
+          "runtime": "ipc",
+          "platforms": [
+            "windows",
+            "macos",
+            "linux"
+          ],
+          "download_url": "https://github.com/nguyen-v/kicad_library_manager/releases/download/v1.3.7/kicad-library-manager-1.3.7.zip",
+          "download_sha256": "0fc0914e428b11effbfddb8607251e862ba3fe5f19ea9738bddcdee204631927",
+          "download_size": 316216,
+          "install_size": 1154359
+        },
+        {
           "version": "1.3.6",
           "status": "stable",
           "kicad_version": "9.0",
