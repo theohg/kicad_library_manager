@@ -160,6 +160,22 @@ def _read_headers(csv_path: str) -> list[str]:
 
 
 def _append_row(csv_path: str, headers: list[str], row: dict[str, str]) -> None:
+    # If the existing CSV does not end with a newline, appending a new row via csv writer
+    # can concatenate with the previous row. Ensure a row boundary first.
+    try:
+        if os.path.exists(csv_path) and os.path.getsize(csv_path) > 0:
+            with open(csv_path, "rb+") as f:
+                f.seek(0, os.SEEK_END)
+                end = f.tell()
+                if end > 0:
+                    f.seek(-1, os.SEEK_END)
+                    last = f.read(1)
+                    if last not in (b"\n", b"\r"):
+                        f.seek(0, os.SEEK_END)
+                        f.write(b"\n")
+    except Exception:
+        # Best-effort only; csv append below still attempts to proceed.
+        pass
     with open(csv_path, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=headers, lineterminator="\n")
         writer.writerow({h: row.get(h, "") for h in headers})

@@ -118,6 +118,38 @@ _SYMBOL_RE = re.compile(r'\(symbol\s+"([^"]+)"')
 _UNIT_VARIANT_RE = re.compile(r".*_\d+_\d+$")
 
 
+def _repo_symbols_signature(repo_path: str) -> str:
+    """
+    Fast signature for repo-local symbol libraries.
+
+    Used to detect when Symbols/*.kicad_sym changed so we can refresh the cached
+    symbol list without requiring a plugin restart.
+    """
+    rp = os.path.abspath(str(repo_path or "").strip())
+    sym_dir = os.path.join(rp, "Symbols")
+    rows: list[str] = []
+    try:
+        if not os.path.isdir(sym_dir):
+            return "no_symbols_dir"
+        with os.scandir(sym_dir) as it:
+            for ent in it:
+                try:
+                    if not ent.is_file():
+                        continue
+                    nm = str(ent.name or "")
+                    if not nm.endswith(".kicad_sym"):
+                        continue
+                    st = ent.stat()
+                    rows.append(f"{nm}\t{int(st.st_mtime)}\t{int(st.st_size)}")
+                except Exception:
+                    continue
+    except Exception:
+        return "scan_error"
+    rows.sort()
+    raw = ("\n".join(rows)).encode("utf-8", errors="ignore")
+    return _hashlib.sha256(raw).hexdigest()
+
+
 def _scan_kicad_sym_file_names(sym_lib_path: str, lib_name: str) -> list[str]:
     """
     Return symbol refs for a .kicad_sym file.
@@ -192,17 +224,28 @@ class SymbolLibraryCache:
             if st and st.get("loading"):
                 return
             if st and st.get("loaded"):
-                return
-            st = {
-                "loading": True,
-                "loaded": False,
-                "symbols": [],
-                "sym_meta": {},  # ref -> (descr, datasheet) (lazy per library)
-                "sym_lib_files": {},  # lib -> .kicad_sym abs path
-                "sym_meta_loaded_libs": set(),  # libs whose meta has been loaded
-                "sym_meta_events": {},  # lib -> threading.Event for in-flight meta load
-                "error": "",
-            }
+                # Auto-refresh when repo-local Symbols/*.kicad_sym changed.
+                try:
+                    prev_sig = str(st.get("repo_symbols_sig") or "")
+                    cur_sig = _repo_symbols_signature(repo_path)
+                    if prev_sig and cur_sig and prev_sig == cur_sig:
+                        return
+                except Exception:
+                    return
+                st["loading"] = True
+                st["error"] = ""
+            else:
+                st = {
+                    "loading": True,
+                    "loaded": False,
+                    "symbols": [],
+                    "sym_meta": {},  # ref -> (descr, datasheet) (lazy per library)
+                    "sym_lib_files": {},  # lib -> .kicad_sym abs path
+                    "sym_meta_loaded_libs": set(),  # libs whose meta has been loaded
+                    "sym_meta_events": {},  # lib -> threading.Event for in-flight meta load
+                    "error": "",
+                    "repo_symbols_sig": "",
+                }
             self._state_by_repo[repo_path] = st
 
         def work():
@@ -243,18 +286,21 @@ class SymbolLibraryCache:
                     syms.extend(_scan_kicad_sym_file_names(lib_path, lib_name))
 
                 syms = sorted(set(syms))
-                return (syms, sym_files, "")
+                repo_sig = _repo_symbols_signature(repo_path)
+                return (syms, sym_files, "", repo_sig)
             except Exception as e:  # noqa: BLE001
-                return ([], {}, str(e))
+                return ([], {}, str(e), "")
 
         def done(res, _err):
-            syms, sym_files, err_txt = res if res else ([], {}, "load failed")
+            syms, sym_files, err_txt, repo_sig = res if res else ([], {}, "load failed", "")
             with self._lock:
                 st2 = self._state_by_repo.get(repo_path) or {}
                 st2["loading"] = False
                 st2["loaded"] = True if not err_txt else False
                 st2["symbols"] = syms
                 st2["sym_lib_files"] = sym_files
+                if repo_sig:
+                    st2["repo_symbols_sig"] = str(repo_sig)
                 st2.setdefault("sym_meta", {})
                 st2.setdefault("sym_meta_loaded_libs", set())
                 st2.setdefault("sym_meta_events", {})
@@ -266,7 +312,7 @@ class SymbolLibraryCache:
             try:
                 res = work()
             except Exception as e:  # noqa: BLE001
-                res = ([], {}, {}, str(e))
+                res = ([], {}, str(e), "")
             try:
                 wx.CallAfter(done, res, None)
             except Exception:

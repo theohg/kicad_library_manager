@@ -1050,7 +1050,18 @@ class AssetBrowserDialogBase(wx.Dialog):
         """
         Merge local scan with indexed libs, avoiding stale shadowed entries.
         """
+        try:
+            # Re-check index freshness each reload (symbols can be added externally
+            # while this dialog stays open).
+            self._p.index.ensure_started(self._repo_path)
+        except Exception:
+            pass
         snap = self._index_snapshot()
+        try:
+            if bool(snap.get("loading")):
+                self._start_index_watch_timer()
+        except Exception:
+            pass
         try:
             local_refs = self._p.list_local_refs(self._repo_path)
         except Exception:
